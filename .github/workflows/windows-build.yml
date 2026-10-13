@@ -1,0 +1,138 @@
+name: Windows build (app + Setup.exe)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned dependencies (hash-checked)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
+
+      - name: Unit and integration tests
+        run: python -m pytest -q
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (python -c "import sys; sys.path.insert(0, 'src'); import x500fs; print(x500fs.__version__)").Trim()
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: PyInstaller bundle
+        run: python -m PyInstaller --noconfirm --clean packaging/x500fs.spec
+
+      - name: Self-test of the bundle (dist)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\X500FlightStation\X500FlightStation.exe" `
+               -ArgumentList "--self-test", "$PWD\selftest-dist.json", "--offscreen" -Wait -PassThru
+          Get-Content selftest-dist.json
+          if ($p.ExitCode -ne 0) { throw "dist self-test failed: $($p.ExitCode)" }
+
+      - name: Locate or install Inno Setup
+        id: iscc
+        shell: pwsh
+        run: |
+          $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+                          "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe", "$env:ProgramFiles\Inno Setup 7\ISCC.exe")
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          & $iscc /? | Select-Object -First 2
+          "path=$iscc" >> $env:GITHUB_OUTPUT
+
+      - name: Build Setup.exe
+        shell: pwsh
+        run: |
+          & "${{ steps.iscc.outputs.path }}" "/DAppVersion=${{ steps.ver.outputs.version }}" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem packaging\Output
+
+      - name: Silent install, then self-test the INSTALLED app without Python on PATH
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem packaging\Output\X500FlightStation-Setup-*.exe | Select-Object -First 1
+          $dir = "$env:RUNNER_TEMP\X500FS-installed"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=`"$dir`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
+          Get-ChildItem $dir | Select-Object -First 10
+          # Remove every Python from PATH and drop Python env vars for the child process.
+          $clean = ($env:PATH -split ';' | Where-Object { $_ -and ($_ -notmatch '(?i)python|hostedtoolcache') }) -join ';'
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "$dir\X500FlightStation.exe"
+          $psi.Arguments = "--self-test `"$PWD\selftest-installed.json`" --offscreen"
+          $psi.UseShellExecute = $false
+          $psi.EnvironmentVariables["PATH"] = $clean
+          foreach ($v in "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "pythonLocation", "Python_ROOT_DIR", "Python3_ROOT_DIR") {
+            if ($psi.EnvironmentVariables.ContainsKey($v)) { $psi.EnvironmentVariables.Remove($v) }
+          }
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit(300000) | Out-Null
+          Get-Content selftest-installed.json
+          $json = Get-Content selftest-installed.json -Raw | ConvertFrom-Json
+          if ($proc.ExitCode -ne 0 -or -not $json.ok -or -not $json.frozen) { throw "installed self-test failed" }
+          if (Get-Command python -ErrorAction SilentlyContinue) { Write-Host "note: python exists on the runner but was removed from the child PATH" }
+          $shot = ($json.steps | Where-Object { $_.name -eq "gui_simulation_report" }).detail.screenshot
+          if ($shot -and (Test-Path $shot)) { Copy-Item $shot "$PWD\selftest-window.png" }
+
+      - name: Silent uninstall (user settings must survive)
+        shell: pwsh
+        run: |
+          $cfg = "$env:APPDATA\X500FlightStation"
+          New-Item -ItemType Directory -Force $cfg | Out-Null
+          Set-Content "$cfg\ci-marker.txt" "user data must survive uninstall"
+          $dir = "$env:RUNNER_TEMP\X500FS-installed"
+          $p = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall failed: $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          if (Test-Path "$dir\X500FlightStation.exe") { throw "app files still present after uninstall" }
+          if (-not (Test-Path "$cfg\ci-marker.txt")) { throw "uninstall removed user data" }
+          Write-Host "uninstall OK; user data kept in $cfg"
+
+      - name: Zip portable bundle
+        shell: pwsh
+        run: Compress-Archive -Path dist\X500FlightStation\* -DestinationPath "X500FlightStation-portable-${{ steps.ver.outputs.version }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: X500FlightStation-Setup-${{ steps.ver.outputs.version }}
+          path: packaging/Output/*.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: X500FlightStation-portable-${{ steps.ver.outputs.version }}
+          path: X500FlightStation-portable-*.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-results
+          path: |
+            selftest-*.json
+            selftest-window.png
+          if-no-files-found: warn

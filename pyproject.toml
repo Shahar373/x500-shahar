@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "x500fs"
 description = "X500 Flight Station - read-only preflight checks and live video for a Holybro X500 V2 (ArduPilot + Raspberry Pi 5)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dynamic = ["version"]
 # Exact pins live in requirements.txt (runtime) and requirements-dev.txt.
 dependencies = [
@@ -37,6 +37,7 @@ x500fs = ["profiles/*.json", "pi_side/*.py", "assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-ra"
 markers = [
     "gui: tests that create Qt widgets (run with QT_QPA_PLATFORM=offscreen)",

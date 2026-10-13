@@ -1,0 +1,21 @@
+# Installed by pi/deploy/install_mediamtx.sh
+[Unit]
+Description=MediaMTX (X500 camera RTSP server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mediamtx
+Group=video
+SupplementaryGroups=video
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx/mediamtx.yml
+Restart=on-failure
+RestartSec=5
+# Minimal hardening. Stricter sandboxing (ProtectSystem=strict etc.) was left
+# out on purpose until verified on the real Pi: MediaMTX's camera component needs
+# /dev/video*, /dev/media*, /dev/dma_heap and a writable temp directory.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

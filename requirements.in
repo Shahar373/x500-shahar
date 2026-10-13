@@ -1,0 +1,7 @@
+# Runtime dependencies (compiled to requirements.txt with hashes):
+#   uv pip compile requirements.in --universal --python-version 3.12 --generate-hashes -o requirements.txt
+PySide6-Essentials==6.12.0
+pymavlink==2.4.50
+paramiko==5.0.0
+keyring==25.7.0
+av==19.0.1

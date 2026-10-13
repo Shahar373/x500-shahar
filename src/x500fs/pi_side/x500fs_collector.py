@@ -55,8 +55,11 @@ DISCOVER_RE = re.compile(r"x500|mavlink|watchdog|black|box|logger|camera|mediamt
 
 def rp(path):
     """Resolve an absolute path under ROOT (ROOT is only changed by tests)."""
-    if ROOT == "/" or path.startswith(ROOT.rstrip("/") + "/"):
+    if ROOT == "/":
         return path
+    norm, root = os.path.normpath(path), os.path.normpath(ROOT)
+    if norm == root or norm.startswith(root + os.sep):
+        return path  # already resolved (e.g. a glob result)
     return os.path.join(ROOT, path.lstrip("/"))
 
 

@@ -1,0 +1,59 @@
+# MediaMTX configuration for X500 Flight Station (camera only).
+#
+# Installed by pi/deploy/install_mediamtx.sh to /etc/mediamtx/mediamtx.yml.
+# Review before use. Parameter names follow MediaMTX v1.x
+# (https://github.com/bluenviron/mediamtx, docs/3-publish/14-raspberry-pi-cameras.md).
+
+logLevel: info
+
+# Control API: used by the desktop app (over SSH, from localhost) to read the
+# stream state and, on an explicit "start video" while disarmed, to apply the
+# requested resolution/FPS at runtime. Never exposed on the network.
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# RTSP only. Bound to localhost because the app reaches it through the SSH
+# tunnel. To allow direct RTSP over Wi-Fi/Tailscale instead, change to ":8554"
+# and select "RTSP direct" in the app's video settings.
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+
+authInternalUsers:
+  # anyone who can reach the (localhost-only) RTSP port may watch
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: read
+      - action: playback
+  # publishing and the API: localhost only
+  - user: any
+    pass:
+    ips: ['127.0.0.1', '::1']
+    permissions:
+      - action: publish
+      - action: api
+      - action: metrics
+
+paths:
+  x500cam:
+    source: rpiCamera
+    # The camera runs only while someone watches (the app's explicit "start
+    # video"), and stops ~10 s after the last viewer leaves.
+    sourceOnDemand: yes
+    sourceOnDemandCloseAfter: 10s
+    rpiCameraCamID: 0
+    # Low-load starting profile. The Pi 5 has no hardware H.264 encoder; with
+    # rpiCameraCodec auto MediaMTX uses its software encoder there. Measure CPU
+    # and temperature in the app before raising these.
+    rpiCameraWidth: 640
+    rpiCameraHeight: 480
+    rpiCameraFPS: 15
+    rpiCameraBitrate: 1000000
+    rpiCameraIDRPeriod: 15
+    rpiCameraCodec: auto

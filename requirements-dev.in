@@ -1,0 +1,5 @@
+# Development / build tools:
+#   uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes -o requirements-dev.txt
+-c requirements.txt
+pytest==9.1.1
+pyinstaller

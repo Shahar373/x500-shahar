@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import time
 
 import pytest
@@ -21,6 +22,10 @@ from x500fs.settings import SettingsStore
 from x500fs.sim.mock_mavlink import MockAutopilot
 
 PASSWORD = "s3cret-Passw0rd"
+
+# The fake SSH server executes POSIX shell commands (echo, cat, python3 -), as
+# the real Pi does. These run on Linux CI; the Windows job runs everything else.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="fake sshd runs POSIX shell commands")
 
 
 class Recorder(Listener):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 
 import paramiko
@@ -19,6 +20,10 @@ from x500fs.transport.ssh import (
     AuthFailed, HostKeyMismatch, HostKeyUnknown, KnownHosts, SshAuth, SshError, SshSession, fingerprint_sha256,
 )
 from x500fs.transport.streams import SshChannelStream
+
+# The fake SSH server executes POSIX shell commands (echo, cat, python3 -), as
+# the real Pi does. These run on Linux CI; the Windows job runs everything else.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="fake sshd runs POSIX shell commands")
 
 
 @pytest.fixture()
