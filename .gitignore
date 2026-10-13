@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build output
+build/
+dist/
+packaging/Output/
+*.spec.bak
+
+# Local runtime data (never commit settings, keys, reports)
+settings.json
+known_hosts
+*.pem
+*.key
+id_*
+reports/
+selftest-*.json

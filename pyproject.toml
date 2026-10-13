@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x500fs"
+description = "X500 Flight Station - read-only preflight checks and live video for a Holybro X500 V2 (ArduPilot + Raspberry Pi 5)"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+# Exact pins live in requirements.txt (runtime) and requirements-dev.txt.
+dependencies = [
+    "PySide6-Essentials>=6.7",
+    "pymavlink>=2.4.40",
+    "paramiko>=3.4",
+    "keyring>=24",
+    "av>=12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.6"]
+
+[project.scripts]
+x500fs-selftest = "x500fs.selftest:cli"
+
+[project.gui-scripts]
+x500-flight-station = "x500fs.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "x500fs.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+x500fs = ["profiles/*.json", "pi_side/*.py", "assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gui: tests that create Qt widgets (run with QT_QPA_PLATFORM=offscreen)",
+    "video: tests that need PyAV encode/decode",
+]

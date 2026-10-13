@@ -1,0 +1,299 @@
+{
+  "schema": "x500fs.profile/1",
+  "id": "flight",
+  "name": "טיסה (Flight)",
+  "mode": "flight",
+  "description": "בדיקות לפני טיסה. בדיקות קריטיות שלא הוגדרו (למשל פרופיל פרמטרים צפוי או מספר תאים) ימנעו תוצאה \"עברו\". גם תוצאה \"עברו\" אינה מבטיחה טיסה בטוחה.",
+  "video_required": false,
+  "battery": {
+    "chemistry": null,
+    "cells": null,
+    "preflight_min_cell_v": null,
+    "rationale": "סוג הסוללה ומספר התאים חייבים להיות מוגדרים במפורש. האפליקציה לא מנחשת אותם."
+  },
+  "expected_params": {
+    "failsafe": {},
+    "rtl": {},
+    "fence": {}
+  },
+  "checks": {
+    "pi.reachable": {
+      "enabled": true,
+      "critical": true
+    },
+    "pi.identity": {
+      "enabled": true,
+      "critical": true,
+      "expected_model_contains": "Raspberry Pi 5"
+    },
+    "pi.uptime": {
+      "enabled": true,
+      "critical": false
+    },
+    "pi.temperature": {
+      "enabled": true,
+      "critical": false,
+      "warn_c": 70,
+      "fail_c": 80,
+      "rationale": "לפי Raspberry Pi, Pi 5 מתחיל להאט (throttling) סביב 80°C. אזהרה ב-70°C נותנת מרווח. מדיניות - ניתן לשנות."
+    },
+    "pi.cpu": {
+      "enabled": true,
+      "critical": false,
+      "warn_pct": 85,
+      "fail_pct": 97,
+      "rationale": "מדיניות ברירת מחדל: עומס CPU גבוה עלול לעכב את mavlink-router ואת הווידאו. אין זה גבול חומרה."
+    },
+    "pi.memory": {
+      "enabled": true,
+      "critical": false,
+      "warn_available_pct": 15,
+      "fail_available_pct": 5,
+      "rationale": "מדיניות ברירת מחדל לזיכרון פנוי (MemAvailable)."
+    },
+    "pi.storage": {
+      "enabled": true,
+      "critical": false,
+      "warn_free_mb": 2048,
+      "fail_free_mb": 512,
+      "rationale": "מדיניות ברירת מחדל: מקום פנוי עבור רישום קופסה שחורה ולוגים."
+    },
+    "pi.power_now": {
+      "enabled": true,
+      "critical": true
+    },
+    "pi.power_history": {
+      "enabled": true,
+      "critical": false
+    },
+    "pi.watchdog": {
+      "enabled": true,
+      "critical": false
+    },
+    "pi.blackbox": {
+      "enabled": true,
+      "critical": false,
+      "max_age_s": 120,
+      "rationale": "קובץ הלוג החדש ביותר צריך להשתנות בתוך 120 שניות כדי להיחשב פעיל. מדיניות - התאם לקצב הכתיבה של הלוגר שלך."
+    },
+    "pi.mavlink_router": {
+      "enabled": true,
+      "critical": true
+    },
+    "pi.camera": {
+      "enabled": true,
+      "critical": false
+    },
+    "pi.tools": {
+      "enabled": true,
+      "critical": false
+    },
+    "link.path": {
+      "enabled": true,
+      "critical": true
+    },
+    "link.rtt": {
+      "enabled": true,
+      "critical": false,
+      "warn_ms": {
+        "wifi": 100,
+        "tailscale": 250,
+        "lte": 400
+      },
+      "fail_ms": {
+        "wifi": 500,
+        "tailscale": 1000,
+        "lte": 1500
+      },
+      "rationale": "זמן תגובה ברמת האפליקציה (בקשת SSH). מדיניות לפי נתיב. זה לא מדד לבריאות MAVLink, שנבדק בנפרד."
+    },
+    "link.interruptions": {
+      "enabled": true,
+      "critical": false,
+      "window_s": 600,
+      "warn_count": 1,
+      "fail_count": 3
+    },
+    "link.interfaces": {
+      "enabled": true,
+      "critical": false
+    },
+    "link.lte": {
+      "enabled": true,
+      "critical": true,
+      "required": "auto"
+    },
+    "link.internet": {
+      "enabled": false,
+      "critical": false
+    },
+    "link.mavlink_heartbeat": {
+      "enabled": true,
+      "critical": true,
+      "max_age_s": 3.0,
+      "rationale": "ArduPilot שולח HEARTBEAT בקצב 1Hz. שלוש הודעות שלא הגיעו נחשבות לנתון ישן."
+    },
+    "link.telemetry": {
+      "enabled": true,
+      "critical": true,
+      "max_age_s": {
+        "SYS_STATUS": 5,
+        "GPS_RAW_INT": 5,
+        "EKF_STATUS_REPORT": 5,
+        "GLOBAL_POSITION_INT": 5
+      }
+    },
+    "link.gcs_peer": {
+      "enabled": true,
+      "critical": false,
+      "rationale": "Mission Planner אחראי על השליטה בטיסה. אם לא נראה HEARTBEAT של תחנת קרקע בקישור הזה, ייתכן שהוא מחובר בנתיב אחר - לכן רק אזהרה."
+    },
+    "fc.identity": {
+      "enabled": true,
+      "critical": true,
+      "expected_autopilot": "ARDUPILOTMEGA",
+      "expected_vehicle_types": [
+        "QUADROTOR"
+      ],
+      "min_firmware": null
+    },
+    "fc.armed": {
+      "enabled": true,
+      "critical": true
+    },
+    "fc.mode": {
+      "enabled": true,
+      "critical": false,
+      "expected_modes": null
+    },
+    "fc.prearm": {
+      "enabled": true,
+      "critical": true,
+      "max_age_s": 5
+    },
+    "fc.arming_checks": {
+      "enabled": true,
+      "critical": true,
+      "allowed_skipped": [],
+      "rationale": "כל בדיקות החימוש של ArduPilot נדרשות, אלא אם רשמת במפורש כאן בדיקה שמותר לדלג עליה (למשל RC, אם אין מקלט)."
+    },
+    "fc.sensors": {
+      "enabled": true,
+      "critical": true,
+      "required": [
+        "gyro",
+        "accel",
+        "mag",
+        "baro",
+        "ahrs",
+        "gps"
+      ],
+      "max_age_s": 5
+    },
+    "fc.logging": {
+      "enabled": true,
+      "critical": false,
+      "max_age_s": 5
+    },
+    "gps.fix": {
+      "enabled": true,
+      "critical": true,
+      "min_fix_type": 3,
+      "max_age_s": 5,
+      "rationale": "ArduPilot דורש קיבוע תלת-ממדי (3D) לחימוש במצבים שתלויים ב-GPS."
+    },
+    "gps.hdop": {
+      "enabled": true,
+      "critical": true,
+      "max_hdop": "fc:GPS_HDOP_GOOD",
+      "max_age_s": 5,
+      "rationale": "הסף נלקח מהפרמטר GPS_HDOP_GOOD של בקר הטיסה - אותו סף ש-ArduPilot משתמש בו בבדיקת החימוש."
+    },
+    "gps.satellites": {
+      "enabled": false,
+      "critical": false,
+      "min_sats": null,
+      "rationale": "אין סף אוניברסלי למספר לוויינים. הגדר סף רק אם יש לך הצדקה."
+    },
+    "gps.accuracy": {
+      "enabled": false,
+      "critical": false,
+      "max_h_acc_m": null
+    },
+    "ekf.status": {
+      "enabled": true,
+      "critical": true,
+      "required_flags": [
+        "attitude",
+        "velocity_horiz",
+        "velocity_vert",
+        "pos_horiz_abs",
+        "pos_vert_abs"
+      ],
+      "variance_warn": 0.5,
+      "variance_fail": "fc:FS_EKF_THRESH",
+      "max_age_s": 5,
+      "rationale": "0.5 היא ההתחלה של הצבע הכתום בתצוגת EKF של Mission Planner. סף הכישלון הוא FS_EKF_THRESH של בקר הטיסה.",
+      "forbidden_flags": [
+        "const_pos_mode",
+        "gps_glitching",
+        "uninitialized"
+      ]
+    },
+    "nav.home": {
+      "enabled": true,
+      "critical": true,
+      "max_age_s": 600,
+      "rationale": "נקודת הבית נדרשת עבור RTL. HOME_POSITION נבקשת בבקשה חד-פעמית (MAV_CMD_REQUEST_MESSAGE)."
+    },
+    "batt.cells_config": {
+      "enabled": true,
+      "critical": true
+    },
+    "batt.voltage": {
+      "enabled": true,
+      "critical": true,
+      "warn_v": "fc:BATT_LOW_VOLT",
+      "fail_v": "fc:BATT_CRT_VOLT",
+      "max_age_s": 5,
+      "rationale": "הספים נלקחים מפרמטרי הסוללה של בקר הטיסה. ערך 0 בפרמטר = לא מוגדר."
+    },
+    "batt.monitor": {
+      "enabled": true,
+      "critical": true,
+      "expected_monitor": null
+    },
+    "batt.current": {
+      "enabled": true,
+      "critical": false,
+      "max_age_s": 5
+    },
+    "batt.remaining": {
+      "enabled": true,
+      "critical": false,
+      "warn_pct": null,
+      "max_age_s": 5
+    },
+    "cfg.failsafe": {
+      "enabled": true,
+      "critical": true
+    },
+    "cfg.rtl": {
+      "enabled": true,
+      "critical": true
+    },
+    "cfg.fence": {
+      "enabled": true,
+      "critical": true
+    },
+    "cfg.gcs_identity": {
+      "enabled": true,
+      "critical": false
+    },
+    "video.stream": {
+      "enabled": true,
+      "critical": false,
+      "min_fps": null
+    }
+  }
+}
