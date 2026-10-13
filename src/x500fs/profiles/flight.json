@@ -35,7 +35,7 @@
       "critical": false,
       "warn_c": 70,
       "fail_c": 80,
-      "rationale": "לפי Raspberry Pi, Pi 5 מתחיל להאט (throttling) סביב 80°C. אזהרה ב-70°C נותנת מרווח. מדיניות - ניתן לשנות."
+      "rationale": "לפי תיעוד Raspberry Pi, ליבות ה-ARM מואטות בהדרגה בין 80°C ל-85°C (הגבול הקשיח 85°C). אזהרה ב-70°C נותנת מרווח. מדיניות - ניתן לשנות."
     },
     "pi.cpu": {
       "enabled": true,
@@ -207,13 +207,13 @@
       "critical": true,
       "max_hdop": "fc:GPS_HDOP_GOOD",
       "max_age_s": 5,
-      "rationale": "הסף נלקח מהפרמטר GPS_HDOP_GOOD של בקר הטיסה - אותו סף ש-ArduPilot משתמש בו בבדיקת החימוש."
+      "rationale": "הסף נלקח מהפרמטר GPS_HDOP_GOOD של בקר הטיסה (יחידות: HDOP×100, ברירת מחדל 140 = 1.4) - אותו סף ש-ArduPilot משתמש בו בבדיקת החימוש."
     },
     "gps.satellites": {
       "enabled": false,
       "critical": false,
       "min_sats": null,
-      "rationale": "אין סף אוניברסלי למספר לוויינים. הגדר סף רק אם יש לך הצדקה."
+      "rationale": "אין פרמטר חימוש של ArduPilot שקובע מספר לוויינים מינימלי. (ל-EKF3 יש סף פנימי קבוע של 6 לוויינים בבדיקת ה-GPS שלו, דרך EK3_GPS_CHECK.) הגדר סף רק אם יש לך הצדקה."
     },
     "gps.accuracy": {
       "enabled": false,

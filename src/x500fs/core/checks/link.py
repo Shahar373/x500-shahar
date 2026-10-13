@@ -87,10 +87,12 @@ def link_rtt(ctx, cfg):
     warn = num(warn_cfg.get(path)) if isinstance(warn_cfg, dict) else num(warn_cfg)
     fail = num(fail_cfg.get(path)) if isinstance(fail_cfg, dict) else num(fail_cfg)
     med = summ["median_ms"]
-    observed = f"חציון {med:.0f}ms · אחרון {summ['last_ms']:.0f}ms · מקס {summ['max_ms']:.0f}ms · n={summ['count']}"
+    last, mx, n = summ["last_ms"], summ["max_ms"], summ["count"]
+    observed = (f"חציון {ltr(f'{med:.0f} ms')} · אחרון {ltr(f'{last:.0f} ms')}"
+                f" · מקס {ltr(f'{mx:.0f} ms')} · {ltr(f'n={n}')}")
     if summ.get("timeouts"):
         observed += f" · timeouts={summ['timeouts']}"
-    expected = f"< {warn:g}ms / < {fail:g}ms ({PATH_LABEL.get(path, path)})" if warn and fail else "לא מוגדר"
+    expected = (ltr(f"< {warn:g} ms / < {fail:g} ms") + f" ({PATH_LABEL.get(path, path)})") if warn and fail else "לא מוגדר"
     if warn is None and fail is None:
         return R(Status.UNKNOWN, "לא הוגדרו ספי RTT לנתיב הזה.", observed=observed, source=src,
                  configured=False, limitations=lim, evidence=summ)
@@ -227,7 +229,7 @@ def link_heartbeat(ctx, cfg):
     hb, age = ctx.require_msg("HEARTBEAT", None)
     src = ctx.src(f"MAVLink HEARTBEAT · {ctx.mav_endpoint()}")
     sysid = link.get("target_sysid")
-    observed = f"לפני {fmt_age(age)} · sysid {ltr(sysid)}"
+    observed = f"לפני {ltr(fmt_age(age))} · {ltr(f'sysid {sysid}')}"
     ev = {"link": link}
     if max_age is None:
         return R(Status.UNKNOWN, "לא הוגדר גיל מקסימלי ל-HEARTBEAT.", observed=observed, source=src,

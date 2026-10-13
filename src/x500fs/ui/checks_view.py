@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
@@ -14,6 +15,14 @@ from ..core.status import CheckResult
 from .style import STATUS_COLORS, STATUS_HE, badge_html
 
 COLS = ["סטטוס", "בדיקה", "נצפה", "צפוי", "מקור", "גיל"]
+_HEBREW = re.compile("[\u0590-\u05FF]")
+
+
+def bidi(text: str | None) -> str:
+    """Technical text without Hebrew letters is shown as one left-to-right run."""
+    if not text:
+        return "—"
+    return text if _HEBREW.search(text) else f"\u2066{text}\u2069"
 
 
 class ChecksView(QWidget):
@@ -91,13 +100,13 @@ class ChecksView(QWidget):
                 item.setToolTip(0, STATUS_HE[r.status.value])
                 item.setText(1, r.title + (" ★" if r.critical else ""))
                 item.setToolTip(1, ("קריטי - " if r.critical else "") + r.explanation)
-                item.setText(2, r.observed or "—")
+                item.setText(2, bidi(r.observed))
                 item.setToolTip(2, r.observed or "")
-                item.setText(3, r.expected or "—")
+                item.setText(3, bidi(r.expected))
                 item.setToolTip(3, r.expected or "")
-                item.setText(4, r.source)
+                item.setText(4, bidi(r.source))
                 item.setToolTip(4, r.source)
-                item.setText(5, fmt_age(r.age_s))
+                item.setText(5, bidi(fmt_age(r.age_s)))
         cur = self.tree.currentItem()
         if cur is not None:
             self._show_details(cur, None)
