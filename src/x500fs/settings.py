@@ -77,7 +77,9 @@ class VideoSettings:
     apply_camera_settings: bool = True
     max_reconnects: int = 5
     stale_after_s: float = 2.0
-    open_timeout_s: float = 8.0
+    # MediaMTX starts an on-demand camera source when the first reader arrives and
+    # may wait up to sourceOnDemandStartTimeout (10 s) before answering.
+    open_timeout_s: float = 12.0
     mediamtx_api: str = "http://127.0.0.1:9997"
 
 

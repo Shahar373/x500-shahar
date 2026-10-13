@@ -87,6 +87,8 @@ class SessionLog:
         self.started_mono = time.monotonic()
         self.preflight_started_wall: float | None = None
         self._interruptions: list[Interruption] = []
+        self._ever_up: set[str] = set()
+        self._never_up_reported: set[str] = set()
         self._events: deque[Event] = deque(maxlen=500)
         self._seq = 0
         self.rtt = RttStats()
@@ -98,18 +100,33 @@ class SessionLog:
 
     # -- interruptions -------------------------------------------------------
     def link_down(self, link: str, reason: str) -> None:
+        """Record an interruption - only for a link that was up at some point.
+
+        A link that never came up is not an "interruption"; its absence is
+        reported by the checks themselves (e.g. HEARTBEAT missing).
+        """
         with self._lock:
-            for i in self._interruptions:
-                if i.link == link and i.open:
-                    return
-            self._interruptions.append(
-                Interruption(link, reason, time.time(), time.monotonic())
-            )
-        self.event("warning", link, f"קישור {link} נותק: {reason}")
+            if link not in self._ever_up:
+                first = link not in self._never_up_reported
+                self._never_up_reported.add(link)
+            else:
+                first = None
+                for i in self._interruptions:
+                    if i.link == link and i.open:
+                        return
+                self._interruptions.append(
+                    Interruption(link, reason, time.time(), time.monotonic())
+                )
+        if first is None:
+            self.event("warning", link, f"קישור {link} נותק: {reason}")
+        elif first:
+            self.event("warning", link, f"קישור {link} עדיין לא עלה: {reason}")
 
     def link_up(self, link: str) -> None:
         closed = False
         with self._lock:
+            self._ever_up.add(link)
+            self._never_up_reported.discard(link)
             for i in self._interruptions:
                 if i.link == link and i.open:
                     i.end_wall = time.time()

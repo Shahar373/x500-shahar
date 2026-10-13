@@ -199,6 +199,7 @@ class SimDrone:
         self._put("pi.ssh", {"state": "connected", "host": "x500pi (SIM)", "port": 22, "user": "sim",
                              "fingerprint": SIM_FINGERPRINT})
         self.session.link_up("ssh")
+        self.session.link_up("mavlink")
         self.ingest.publish_link(True, "live", transport="simulation")
         self.session.event("info", "sim", "מצב סימולציה פעיל - הנתונים אינם מהרחפן")
         self._put("pi.boot_history", {"current_boot_id": self._boot_id, "previous_boot_id": None,

@@ -15,6 +15,7 @@ def _report(w: World, secrets=None, manual=None):
     results_map, overall = w.evaluate()
     results = list(results_map.values())
     m = manual or ManualChecklist()
+    w.session.link_up("mavlink")
     w.session.link_down("mavlink", "test outage")
     w.session.link_up("mavlink")
     return build_report(

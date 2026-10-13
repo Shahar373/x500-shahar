@@ -96,6 +96,10 @@ def test_interruptions_counted_and_ongoing_warns():
     w = World().healthy()
     res, _ = w.evaluate()
     assert res["link.interruptions"].status is Status.PASS
+    w.session.link_down("mavlink", "never up")  # not an interruption: the link was never up
+    assert w.session.interruptions() == []
+    w.session.link_up("mavlink")
+    w.session.link_up("ssh")
     w.session.link_down("mavlink", "test")
     res, _ = w.evaluate()
     assert res["link.interruptions"].status is Status.WARN
