@@ -135,7 +135,10 @@ def _skipped_checks(kind, value):
         if d["all"]:
             return []
         enabled = set(d["enabled_bits"])
-        return [n for b, n in C.ARMING_CHECK_BITS.items() if b and n not in enabled]
+        # Only bits that exist for Copter in ARMING_CHECK firmware (<= 4.6):
+        # bit 9 (airspeed) is Plane-only and bit 20 (OSD) postdates ARMING_CHECK.
+        return [n for b, n in C.ARMING_CHECK_BITS.items()
+                if b and b not in C.ARMING_CHECK_NOT_COPTER and n not in enabled]
     # ARMING_SKIPCHK: bit set = check skipped; -1 / all bits = everything skipped
     if value == -1 or value & 1:
         return ["ALL"]

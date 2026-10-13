@@ -55,7 +55,7 @@ DISCOVER_RE = re.compile(r"x500|mavlink|watchdog|black|box|logger|camera|mediamt
 
 def rp(path):
     """Resolve an absolute path under ROOT (ROOT is only changed by tests)."""
-    if ROOT == "/":
+    if ROOT == "/" or path.startswith(ROOT.rstrip("/") + "/"):
         return path
     return os.path.join(ROOT, path.lstrip("/"))
 
@@ -282,18 +282,51 @@ def sec_thermal(cfg):
     return {"zones": zones, "cpu_temp_c": cpu}
 
 
+PROC_RE = re.compile(r"^(mediamtx|mtxrpicam.*|rpicam-.*|libcamera.*|ffmpeg|mavlink-route.*)$")
+
+
+def _proc_ticks():
+    """utime+stime ticks of camera/telemetry processes, keyed by pid."""
+    out = {}
+    for d in glob.glob(rp("/proc/[0-9]*")):
+        comm = (read_text(os.path.join(d, "comm"), 64) or "").strip()
+        if not PROC_RE.match(comm):
+            continue
+        stat = read_text(os.path.join(d, "stat"), 4096) or ""
+        try:
+            fields = stat.rsplit(")", 1)[1].split()
+            out[os.path.basename(d)] = (comm, int(fields[11]) + int(fields[12]))
+        except (IndexError, ValueError):
+            continue
+    return out
+
+
 def sec_cpu(cfg):
     a = parse_proc_stat_cpu(read_text("/proc/stat"))
+    pa = _proc_ticks()
+    t0 = time.time()
     time.sleep(0.5)
     b = parse_proc_stat_cpu(read_text("/proc/stat"))
+    pb = _proc_ticks()
+    dt = time.time() - t0
     usage = None
     if a and b and b[0] > a[0]:
         usage = round(100.0 * (1.0 - (b[1] - a[1]) / float(b[0] - a[0])), 1)
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError, AttributeError):
+        hz = 100
+    procs = []
+    for pid, (comm, ticks) in pb.items():
+        if pid in pa and dt > 0:
+            procs.append({"pid": int(pid), "name": comm,
+                          "cpu_pct_of_one_core": round(100.0 * (ticks - pa[pid][1]) / hz / dt, 1)})
     load = (read_text("/proc/loadavg") or "").split()[:3]
     freq = read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
     return {
         "usage_pct": usage,
         "sample_s": 0.5,
+        "processes": sorted(procs, key=lambda p: -p["cpu_pct_of_one_core"]),
         "loadavg": [float(x) for x in load] if load else None,
         "cores": os.cpu_count(),
         "freq_mhz": int(freq) / 1000.0 if freq and freq.strip().isdigit() else None,

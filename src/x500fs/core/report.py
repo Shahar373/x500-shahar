@@ -165,6 +165,21 @@ def render_html(doc: dict) -> str:
                    f"<td>{_e(m.get('severity_name'))}</td><td dir='ltr'>{_e(m.get('text'))}</td></tr>"
                    for m in doc["autopilot_messages"]) or "<tr><td colspan='3'>אין</td></tr>"
     hw = _e(json.dumps(doc["hardware"], ensure_ascii=False, indent=2))
+    video = doc.get("video") or {}
+    perf = video.get("performance") if isinstance(video, dict) else None
+    if perf:
+        def _st(x):
+            return "—" if not x else f"{x['min']} / {x['avg']} / {x['max']}"
+        video_html = (
+            f"<p>דגימות: {_e(perf['samples'])} · הגדרה מבוקשת: <code>{_e(perf['requested'])}</code></p>"
+            "<table><thead><tr><th>מדד</th><th>מינ' / ממוצע / מקס'</th></tr></thead><tbody>"
+            f"<tr><td>FPS שנמדד במחשב</td><td>{_e(_st(perf['fps_measured']))}</td></tr>"
+            f"<tr><td>CPU כולל ב-Pi (%)</td><td>{_e(_st(perf['pi_cpu_total_pct']))}</td></tr>"
+            f"<tr><td>CPU של תהליכי המצלמה (% מליבה אחת)</td><td>{_e(_st(perf['camera_processes_cpu_pct_of_one_core']))}</td></tr>"
+            f"<tr><td>טמפרטורת Pi (°C)</td><td>{_e(_st(perf['pi_temp_c']))}</td></tr>"
+            f"</tbody></table><p class='lim'>{_e(perf['note'])}</p>")
+    else:
+        video_html = "<p>לא נאספו מדידות וידאו בסשן הזה.</p>"
     prof = doc["profile"]
     conn = doc["connection"]
     sim_banner = ("<div class='simbanner'>סימולציה - הנתונים בדוח זה מדומים ואינם מהרחפן</div>" if sim else "")
@@ -213,6 +228,7 @@ code{{direction:ltr;unicode-bidi:isolate}}
 <table><thead><tr><th>קישור</th><th>התחלה</th><th>סיום</th><th>משך</th><th>סיבה</th></tr></thead><tbody>{intr}</tbody></table>
 <h2>הודעות מבקר הטיסה (STATUSTEXT)</h2>
 <table><thead><tr><th>שעה</th><th>חומרה</th><th>טקסט</th></tr></thead><tbody>{msgs}</tbody></table>
+<h2>וידאו - מדידות ביצועים</h2>{video_html}
 <h2>מזהי חומרה וקושחה</h2><pre>{hw}</pre>
 <h2>חיבור</h2><pre>{_e(json.dumps(conn, ensure_ascii=False, indent=2))}</pre>
 </body></html>

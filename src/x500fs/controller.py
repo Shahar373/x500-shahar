@@ -77,6 +77,8 @@ class Controller:
         self._lock = threading.Lock()
         self.preflight_started: float | None = None
         self.camera_info: dict | None = None
+        self.video_perf: list[dict] = []
+        self._perf_last_t: float | None = None
 
     # ------------------------------------------------------------------ settings
     @property
@@ -134,6 +136,8 @@ class Controller:
         self.session = SessionLog()
         self.store = ObservationStore(simulated=s.simulation)
         self.statustext.clear()
+        self.video_perf = []
+        self._perf_last_t = None
         self.connected = True
         if s.simulation:
             self.connecting_mode = "simulation"
@@ -288,7 +292,57 @@ class Controller:
             out["params_pending"] = 0
         return out
 
+    def _sample_video_performance(self) -> None:
+        """While video plays, pair each new Pi sample (CPU/temp/processes) with the measured FPS."""
+        w = self._video
+        col = self.store.get("pi.collector")
+        if w is None or col is None or col.t_mono == self._perf_last_t or w.state != "playing":
+            return
+        self._perf_last_t = col.t_mono
+        try:
+            sec = col.value["sections"]
+            cpu = sec["cpu"]["data"] or {}
+            temp = (sec["thermal"]["data"] or {}).get("cpu_temp_c")
+        except (KeyError, TypeError):
+            return
+        st = w.status()
+        v = self.settings.video
+        self.video_perf.append({
+            "t": time.strftime("%H:%M:%S"),
+            "requested": f"{v.width}x{v.height}@{v.fps}",
+            "decoded": f"{st.get('width')}x{st.get('height')}",
+            "fps_measured": st.get("fps"),
+            "pi_cpu_total_pct": cpu.get("usage_pct"),
+            "pi_temp_c": temp,
+            "camera_processes": [p for p in cpu.get("processes") or []
+                                 if not str(p.get("name", "")).startswith("mavlink")],
+        })
+        if len(self.video_perf) > 720:
+            del self.video_perf[:360]
+
+    def video_perf_summary(self) -> dict | None:
+        rows = self.video_perf
+        if not rows:
+            return None
+
+        def stats(key):
+            vals = [r[key] for r in rows if isinstance(r.get(key), (int, float))]
+            return None if not vals else {"min": min(vals), "avg": round(sum(vals) / len(vals), 1), "max": max(vals)}
+        cam = [sum(p.get("cpu_pct_of_one_core") or 0 for p in r["camera_processes"]) for r in rows]
+        return {
+            "samples": len(rows),
+            "requested": rows[-1]["requested"],
+            "fps_measured": stats("fps_measured"),
+            "pi_cpu_total_pct": stats("pi_cpu_total_pct"),
+            "pi_temp_c": stats("pi_temp_c"),
+            "camera_processes_cpu_pct_of_one_core": None if not cam else
+            {"min": min(cam), "avg": round(sum(cam) / len(cam), 1), "max": max(cam)},
+            "note": "דגימות CPU של חצי שנייה כל מחזור איסוף; אינן מודדות השהיה (latency).",
+            "rows": rows[-60:],
+        }
+
     def evaluate(self):
+        self._sample_video_performance()
         ctx = Ctx(self.store.snapshot(), self.profile, self.drone_config(), self.session)
         results = evaluate(ctx)
         return results, aggregate(results), ctx.snap
@@ -451,7 +505,9 @@ class Controller:
                 val = credentials.get(ident)
                 if val:
                     secrets.append(val)
-        video = self._video.status() if self._video else None
+        video = {"current": self._video.status() if self._video else None,
+                 "camera_settings_applied": self.camera_info,
+                 "performance": self.video_perf_summary()}
         doc = build_report(
             snap=snap, results=results, overall=overall, profile_summary=self.profile.summary(),
             profile_error=self.profile_error, settings_summary=self.settings_summary(),

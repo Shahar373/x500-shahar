@@ -182,3 +182,7 @@ ARMING_CHECK_BITS: dict[int, str] = {
     19: "FFT",
     20: "OSD",
 }
+
+# Bits of ARMING_CHECK that do not apply to Copter on firmware that still uses
+# ARMING_CHECK (<= 4.6): 9 = airspeed (Plane only), 20 = OSD (added later).
+ARMING_CHECK_NOT_COPTER = frozenset({9, 20})
