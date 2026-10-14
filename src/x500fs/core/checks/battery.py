@@ -102,7 +102,8 @@ def batt_monitor(ctx, cfg):
     src = ctx.src("MAVLink PARAM_VALUE (קריאה בלבד)")
     got = ctx.param("BATT_MONITOR")
     if got is None:
-        raise Unavailable(R(Status.UNKNOWN, "BATT_MONITOR לא נקרא מבקר הטיסה.", source=src, missing=("BATT_MONITOR",)))
+        raise Unavailable(R(Status.UNKNOWN, "BATT_MONITOR לא נקרא מבקר הטיסה." + ctx.param_unread_note("BATT_MONITOR"),
+                            source=src, missing=("BATT_MONITOR",)))
     val, age = got
     others = {n: (ctx.param(n) or (None,))[0] for n in ("BATT_CAPACITY", "BATT_VOLT_MULT", "BATT_AMP_PERVLT", "BATT_ARM_VOLT")}
     observed = f"BATT_MONITOR={val}" + "".join(f" · {n}={v}" for n, v in others.items() if v is not None)
@@ -230,7 +231,8 @@ def cfg_gcs_identity(ctx, cfg):
            "שמאפסות את טיימר ה-GCS failsafe ב-ArduPilot. לכן היא אינה יכולה להיחשב כתחנת הקרקע ואינה מסתירה "
            "ניתוק של Mission Planner.")
     if gcs is None:
-        raise Unavailable(R(Status.UNKNOWN, "MAV_GCS_SYSID / SYSID_MYGCS לא נקראו.", source=src, limitations=lim))
+        raise Unavailable(R(Status.UNKNOWN, "MAV_GCS_SYSID / SYSID_MYGCS לא נקראו."
+                            + ctx.param_unread_note("MAV_GCS_SYSID", "SYSID_MYGCS"), source=src, limitations=lim))
     lo = int(gcs[0])
     top = int(hi[0]) if hi is not None and int(hi[0]) >= lo else lo
     enforced = (enforce is not None and int(enforce[0]) == 1) or (options is not None and int(options[0]) & 1)

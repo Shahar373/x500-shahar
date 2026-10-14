@@ -378,3 +378,88 @@ def test_camera_missing_is_warning_unless_video_required():
     w.profile.video_required = True
     res, _ = w.evaluate()
     assert res["pi.camera"].status is Status.FAIL
+
+
+def _with_section(w, name, **changes):
+    doc = copy.deepcopy(w.store.get("pi.collector").value)
+    doc["sections"][name]["data"].update(changes)
+    w.put("pi.collector", doc)
+
+
+def test_storage_small_boot_partition_uses_percent_only():
+    # Real Pi 5: /boot/firmware is ~512 MB and 13% used - must not fail the 512 MB free-space floor.
+    w = World().healthy()
+    _with_section(w, "storage", mounts=[
+        {"path": "/", "total_mb": 58000.0, "free_mb": 46600.0},
+        {"path": "/boot/firmware", "total_mb": 510.0, "free_mb": 445.0}])
+    res, _ = w.evaluate()
+    r = res["pi.storage"]
+    assert r.status is Status.PASS, r.explanation
+    assert "/boot/firmware" in r.expected and "445 MB" in r.observed
+    # the percentage thresholds still apply to it
+    _with_section(w, "storage", mounts=[{"path": "/boot/firmware", "total_mb": 510.0, "free_mb": 15.0}])
+    res, _ = w.evaluate()
+    assert res["pi.storage"].status is Status.FAIL
+    # and the MB floor still applies to the root filesystem
+    _with_section(w, "storage", mounts=[{"path": "/", "total_mb": 58000.0, "free_mb": 400.0}])
+    res, _ = w.evaluate()
+    assert res["pi.storage"].status is Status.FAIL
+
+
+def test_storage_percent_only_default_for_old_user_profile():
+    # A user copy of the profile written before percent_only_paths existed still gets the boot exemption.
+    w = World().healthy()
+    doc = profile_mod.builtin_doc("bench")
+    doc["checks"]["pi.storage"].pop("percent_only_paths")
+    w.profile = profile_mod.from_dict(doc, "old-user-copy")
+    _with_section(w, "storage", mounts=[{"path": "/boot/firmware", "total_mb": 510.0, "free_mb": 445.0}])
+    res, _ = w.evaluate()
+    assert res["pi.storage"].status is Status.PASS
+
+
+def test_tools_not_configured_is_not_applicable():
+    w = World().healthy()
+    res, _ = w.evaluate()
+    assert res["pi.tools"].status is Status.NOT_APPLICABLE
+
+
+def test_blackbox_header_difference_is_described():
+    w = World().healthy()
+    samples = copy.deepcopy(w.store.get("pi.collector").value["sections"]["blackbox"]["data"]["samples"])
+    samples.update(header_ok=False, header_seen=["timestamp", "temp_c", "throttled", "ram_pct"])
+    _with_section(w, "blackbox", samples=samples)
+    res, _ = w.evaluate()
+    r = res["pi.blackbox"]
+    assert r.status is Status.WARN
+    assert "חסרות עמודות" in r.explanation and "mavlink" in r.explanation
+    samples.update(header_seen=["2026-10-14T18:00:00+03:00", "46.6", "0x0"])
+    _with_section(w, "blackbox", samples=samples)
+    res, _ = w.evaluate()
+    assert "אינה כותרת" in res["pi.blackbox"].explanation
+
+
+def test_camera_missing_hint_from_kernel_and_permissions():
+    w = World().healthy()
+    base = {"cameras": [], "note": "No cameras available", "exit_code": 0}
+    _with_section(w, "camera", **base, kernel_sensor={"driver": "imx219", "driver_loaded": False, "devices": []},
+                  in_video_group=True, media_access=True)
+    res, _ = w.evaluate()
+    assert res["pi.camera"].status is Status.WARN
+    assert "לא טען את מנהל ההתקן" in res["pi.camera"].explanation
+    _with_section(w, "camera", **base, in_video_group=False)
+    res, _ = w.evaluate()
+    assert "הרשאה" in res["pi.camera"].explanation
+    _with_section(w, "camera", **base, in_video_group=True, media_access=True,
+                  kernel_sensor={"driver": "imx219", "driver_loaded": True, "devices": ["4-0010"]})
+    res, _ = w.evaluate()
+    assert "הקרנל זיהה" in res["pi.camera"].explanation
+
+
+def test_unread_param_explains_pending_or_no_answer():
+    w = World().healthy(params={})
+    res, _ = w.evaluate()
+    assert "אוטומטית" in res["fc.arming_checks"].explanation
+    w.put("mav.param_missing.ARMING_CHECK", True)
+    w.put("mav.param_missing.ARMING_SKIPCHK", True)
+    res, _ = w.evaluate()
+    assert "לא ענה" in res["fc.arming_checks"].explanation

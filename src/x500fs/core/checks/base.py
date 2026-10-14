@@ -197,6 +197,12 @@ class Ctx:
         o = self.snap.get(f"mav.param_missing.{name}")
         return o is not None
 
+    def param_unread_note(self, *names: str) -> str:
+        """Why a parameter has no value yet: the read is still running, or the FC never answered."""
+        if names and all(self.param_missing(n) for n in names):
+            return " הבקר לא ענה לבקשת הקריאה (3 ניסיונות) - ייתכן שהפרמטר לא קיים בגרסה זו."
+        return " הקריאה מתבצעת אוטומטית אחרי החיבור ובכל 'הרץ בדיקה' - חכה כמה שניות."
+
     def resolve_threshold(self, value: Any) -> tuple[float | None, str]:
         """Resolve a profile threshold. Returns (number or None, description)."""
         if value is None:

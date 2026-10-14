@@ -107,7 +107,9 @@ def make_collector_doc(scenario: str, link_path: str, uptime_s: float, boot_id: 
                                      {"pid": 899, "name": "rpicam-vid", "cpu_pct_of_one_core": 9.5}]
                        if video_profile else []}),
             "memory": ok({"total_kb": 8_000_000, "available_kb": 6_400_000, "available_pct": 80.0}),
-            "storage": ok({"mounts": [{"path": "/", "total_mb": 58000.0, "free_mb": 41000.0, "read_only": False}]}),
+            "storage": ok({"mounts": [{"path": "/", "total_mb": 58000.0, "free_mb": 41000.0, "read_only": False},
+                                      {"path": "/boot/firmware", "total_mb": 510.0, "free_mb": 445.0,
+                                       "read_only": False}]}),
             "power": ok({"vcgencmd": "/usr/bin/vcgencmd", "throttled": throttled,
                          "throttled_raw": f"throttled={hex(throttled)}",
                          "throttled_decoded": {"current": ["under_voltage"] if throttled & 1 else [],

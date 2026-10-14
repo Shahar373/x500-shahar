@@ -4,7 +4,7 @@
 
 | הודעה | מתי | השפעה על הרחפן |
 |---|---|---|
-| `PARAM_REQUEST_READ` (לפי שם) | בתחילת סשן בדיקה ("הרץ בדיקה") | קריאה בלבד. הבקר עונה ב-`PARAM_VALUE`, ש-mavlink-router מעביר גם ל-Mission Planner (ערכים אמיתיים, ללא שינוי) |
+| `PARAM_REQUEST_READ` (לפי שם) | פעם אחת אחרי החיבור (כשמתקבל HEARTBEAT טרי), ושוב בכל "הרץ בדיקה" | קריאה בלבד. הבקר עונה ב-`PARAM_VALUE`, ש-mavlink-router מעביר גם ל-Mission Planner (ערכים אמיתיים, ללא שינוי) |
 | `COMMAND_LONG` עם `MAV_CMD_REQUEST_MESSAGE` (512) | כל 2 שניות (ניתן לשינוי): SYS_STATUS, ‏GPS_RAW_INT, ‏EKF_STATUS_REPORT, ‏GLOBAL_POSITION_INT, ‏BATTERY_STATUS, ‏ATTITUDE, ‏VFR_HUD. פעם אחת: AUTOPILOT_VERSION, ‏HOME_POSITION | בקשה חד-פעמית לשליחת הודעה. לא משנה קצבי שידור ולא כותבת פרמטרים. נתמך ב-ArduPilot 4.6.3 וב-4.7.x |
 | `COMMAND_LONG` עם `MAV_CMD_RUN_PREARM_CHECKS` (401) | **רק** בלחיצה על "הרץ בדיקה", ורק כש-HEARTBEAT טרי מאשר שהרחפן לא חמוש (אפשר לכבות בהגדרות) | ArduPilot מריץ את בדיקות ה-Pre-arm ושולח `PreArm:` על כל כשל. לא מחמש, לא משנה מצב ולא כותב פרמטרים |
 

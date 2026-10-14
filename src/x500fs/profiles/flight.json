@@ -58,9 +58,10 @@
       "critical": false,
       "warn_free_mb": 2048,
       "fail_free_mb": 512,
-      "rationale": "x500-health: דיסק בשימוש ≥ 85% אזהרה, ≥ 95% קריטי. בנוסף, סף מקום פנוי במגה-בייט עבור הלוגים. מקור: הסקריפט הקיים x500-health / x500-preflight ב-Pi (snapshot 14.10.2026). מדיניות - ניתן לשנות.",
+      "rationale": "x500-health: דיסק בשימוש ≥ 85% אזהרה, ≥ 95% קריטי. בנוסף, סף מקום פנוי במגה-בייט עבור הלוגים. מחיצת ה-boot של ה-Pi קטנה מטבעה (כ-512MB) ואינה מכילה לוגים, ולכן עליה חל רק אחוז השימוש (percent_only_paths). מקור: הסקריפט הקיים x500-health / x500-preflight ב-Pi (snapshot 14.10.2026). מדיניות - ניתן לשנות.",
       "warn_used_pct": 85,
-      "fail_used_pct": 95
+      "fail_used_pct": 95,
+      "percent_only_paths": ["/boot/firmware", "/boot"]
     },
     "pi.power_now": {
       "enabled": true,

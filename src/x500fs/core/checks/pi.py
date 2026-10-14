@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from ...pi_side.x500fs_collector import BLACKBOX_HEADER
 from ..status import Status
 from .base import R, Unavailable, check, fmt_age, ltr, num
 
@@ -193,6 +194,11 @@ def pi_memory(ctx, cfg):
     return R(Status.PASS, "יש מספיק זיכרון פנוי.", observed=observed, expected=expected, source=src, age_s=age)
 
 
+# Small fixed-size partitions (the Pi's ~512 MB FAT boot partition) can never meet a free-space
+# floor sized for logs, so only the percentage thresholds apply to them.
+PERCENT_ONLY_PATHS = ("/boot/firmware", "/boot")
+
+
 @check("pi.storage", "pi", "מקום פנוי באחסון")
 def pi_storage(ctx, cfg):
     data, age = ctx.require_section("storage")
@@ -202,17 +208,25 @@ def pi_storage(ctx, cfg):
         raise Unavailable(R(Status.UNKNOWN, "לא דווחו נתוני אחסון.", source=src, age_s=age))
     warn, fail, wd, fd = _thresholds(ctx, cfg, "warn_free_mb", "fail_free_mb")
     warn_pct, fail_pct = num(cfg.get("warn_used_pct")), num(cfg.get("fail_used_pct"))
-    status, reasons, parts = Status.PASS, [], []
+    pct_only = cfg.get("percent_only_paths")
+    if not isinstance(pct_only, list):
+        pct_only = list(PERCENT_ONLY_PATHS)
+    status, reasons, parts, exempt = Status.PASS, [], [], []
     for m in mounts:
         free, total = num(m.get("free_mb")), num(m.get("total_mb"))
         if free is None or not total:
             continue
         used = 100.0 * (1 - free / total)
-        parts.append(f"{ltr(m.get('path'))}: {free / 1024:.1f} GB פנוי ({used:.0f}% בשימוש)")
+        size = f"{free / 1024:.1f} GB" if free >= 1024 else f"{free:.0f} MB"
+        parts.append(f"{ltr(m.get('path'))}: {size} פנוי ({used:.0f}% בשימוש)")
+        mb_warn, mb_fail = warn, fail
+        if m.get("path") in pct_only and (warn_pct is not None or fail_pct is not None):
+            mb_warn = mb_fail = None
+            exempt.append(ltr(m.get("path")))
         level = Status.PASS
-        if (fail is not None and free <= fail) or (fail_pct is not None and used >= fail_pct):
+        if (mb_fail is not None and free <= mb_fail) or (fail_pct is not None and used >= fail_pct):
             level = Status.FAIL
-        elif (warn is not None and free <= warn) or (warn_pct is not None and used >= warn_pct):
+        elif (mb_warn is not None and free <= mb_warn) or (warn_pct is not None and used >= warn_pct):
             level = Status.WARN
         if level is not Status.PASS:
             reasons.append(ltr(m.get("path")))
@@ -223,6 +237,8 @@ def pi_storage(ctx, cfg):
     observed = ", ".join(parts)
     expected = f"פנוי > {wd} MB / > {fd} MB; בשימוש < {warn_pct:g}% / < {fail_pct:g}%" if warn_pct and fail_pct \
         else f"> {wd} MB / > {fd} MB"
+    if exempt:
+        expected += f" (ב-{', '.join(exempt)} - רק אחוז השימוש, כי המחיצה קטנה מטבעה)"
     if warn is None and fail is None and warn_pct is None and fail_pct is None:
         return R(Status.UNKNOWN, "לא הוגדרו ספים.", observed=observed, source=src, age_s=age, configured=False)
     expl = {Status.PASS: "יש מספיק מקום פנוי.", Status.WARN: "מקום פנוי נמוך ב-" + ", ".join(reasons) + ".",
@@ -453,10 +469,29 @@ def pi_blackbox(ctx, cfg):
         unit_r.evidence.update(ev)
         return unit_r
     if samples.get("header_ok") is False:
-        return R(Status.WARN, "הדגימות עדכניות, אבל כותרת ה-CSV שונה מהצפוי.", observed=observed,
-                 expected=expected, source=src, age_s=age, evidence=ev, limitations=lim)
+        return R(Status.WARN, "הדגימות עדכניות, אבל כותרת ה-CSV שונה מהצפוי." + _header_diff(samples.get("header_seen")),
+                 observed=observed, expected=expected, source=src, age_s=age, evidence=ev, limitations=lim)
     return R(Status.PASS, "השירות פעיל ויש דגימה תקינה עדכנית.", observed=observed, expected=expected,
              source=src, age_s=age, evidence=ev, limitations=lim)
+
+
+def _header_diff(seen) -> str:
+    """Say how the first line of the CSV differs from the expected header (collector >= this version)."""
+    if not isinstance(seen, list) or not seen:
+        return ""
+    seen = [str(c)[:40] for c in seen]
+    if seen[0] != "timestamp":
+        return " השורה הראשונה בקובץ אינה כותרת: " + ltr(",".join(seen)[:120])
+    missing = [c for c in BLACKBOX_HEADER if c not in seen]
+    extra = [c for c in seen if c not in BLACKBOX_HEADER]
+    parts = []
+    if missing:
+        parts.append("חסרות עמודות: " + ltr(", ".join(missing)))
+    if extra:
+        parts.append("עמודות נוספות: " + ltr(", ".join(extra)))
+    if not parts:
+        parts.append("אותן עמודות בסדר אחר: " + ltr(",".join(seen)[:160]))
+    return " " + "; ".join(parts) + "."
 
 
 @check("pi.monitors", "pi", "שירותי ניטור (health / net)")
@@ -555,14 +590,31 @@ def pi_camera(ctx, cfg):
             return R(Status.UNKNOWN, f"לא זוהתה מצלמה בזמן ששירות הווידאו ({ltr(video_active)}) פעיל - "
                      "ייתכן שהמצלמה תפוסה. אין ראיה לכאן או לכאן.", observed="0 מצלמות", expected="IMX219 מזוהה",
                      source=src, age_s=age, evidence=data)
-        return R(bad, "לא זוהתה מצלמה." + (f" ({ltr(busy)})" if busy else ""), observed="0 מצלמות",
-                 expected="IMX219 מזוהה", source=src, age_s=age, evidence=data)
+        return R(bad, "לא זוהתה מצלמה." + (f" ({ltr(busy)})" if busy else "") + _camera_hint(data),
+                 observed="0 מצלמות", expected="IMX219 מזוהה", source=src, age_s=age, evidence=data)
     names = ", ".join(str(c.get("sensor") or c.get("desc") or "?") for c in cams)
     if any("imx219" in str(c.get("sensor", "")).lower() for c in cams):
         return R(Status.PASS, "מצלמה IMX219 (Camera Module v2) זוהתה.", observed=ltr(names),
                  expected="IMX219 מזוהה", source=src, age_s=age, evidence=data)
     return R(bad, "זוהתה מצלמה אך לא IMX219.", observed=ltr(names), expected="IMX219 מזוהה",
              source=src, age_s=age, evidence=data)
+
+
+def _camera_hint(data: dict) -> str:
+    """Narrow down why rpicam lists no camera, from the read-only evidence the collector adds."""
+    if data.get("permission_denied") or data.get("in_video_group") is False or data.get("media_access") is False:
+        return (" למשתמש ב-Pi אין הרשאה למכשירי המצלמה (לא בקבוצה video או אין גישה ל-/dev/media*), ולכן "
+                "rpicam לא רואה מצלמה גם אם היא מחוברת. שירות הווידאו רץ כ-root ועשוי לעבוד בכל זאת.")
+    k = data.get("kernel_sensor")
+    if not isinstance(k, dict):
+        return ""
+    if k.get("devices"):
+        return (" הקרנל זיהה את החיישן (" + ltr(", ".join(k["devices"])) + "), אבל rpicam לא - "
+                "ייתכן שהמצלמה תפוסה על ידי תהליך אחר.")
+    if k.get("driver_loaded"):
+        return " מנהל ההתקן imx219 טעון אבל החיישן לא נמצא - בדוק את הכבל ואת החיבור."
+    return (" הקרנל לא טען את מנהל ההתקן imx219, כלומר המצלמה לא זוהתה באתחול. בדוק את הכבל ואת כיוון החיבור "
+            "(ב-Pi 5 נדרש כבל עם מחבר 22 פינים בצד ה-Pi), חבר רק כשה-Pi כבוי, ובדוק camera_auto_detect ב-config.txt.")
 
 
 @check("pi.tools", "pi", "סקריפטים קיימים ב-Pi")

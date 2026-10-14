@@ -186,11 +186,11 @@ def sections_for(pi_settings, video_settings, slow: bool) -> list[str]:
     """Bounded cadence: cheap sections every cycle, slow probes only when due."""
     names = list(collector_mod.FAST_SECTIONS)
     if slow:
-        names += [n for n in collector_mod.SLOW_SECTIONS if n not in ("mediamtx", "tools")]
+        # "tools" is always requested: with nothing configured it returns {} at once, and the
+        # check can then say "not configured" instead of "not received".
+        names += [n for n in collector_mod.SLOW_SECTIONS if n != "mediamtx"]
         if video_settings.backend == "rtsp":
             names.append("mediamtx")
-        if any(isinstance(t, dict) and t.get("enabled") for t in pi_settings.tools or []):
-            names.append("tools")
     return names
 
 

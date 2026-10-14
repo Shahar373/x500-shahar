@@ -219,7 +219,16 @@ class Controller:
                         request_messages=m.request_messages, request_interval_s=m.request_interval_s)
         self._mav = MavlinkClient(self._mav_stream_factory(), ingest, self.session, cfg,
                                   describe=self._mav_endpoint_text())
+        # Read-only PARAM_REQUEST_READ, queued now and sent once the vehicle HEARTBEAT is live,
+        # so the checks have parameters without waiting for "run preflight".
+        self._mav.refresh(self._param_names())
         self._mav.start()
+
+    def _param_names(self) -> list[str]:
+        extra = []
+        for group in (self.profile.expected_params or {}).values():
+            extra.extend(group.keys())
+        return all_params(extra)
 
     def _mav_endpoint_text(self) -> str:
         m = self.settings.mavlink
@@ -307,10 +316,7 @@ class Controller:
         if self._poller:
             self._poller.refresh()
         if self._mav:
-            extra = []
-            for group in (self.profile.expected_params or {}).values():
-                extra.extend(group.keys())
-            self._mav.refresh(all_params(extra))
+            self._mav.refresh(self._param_names())
             if self.settings.mavlink.prearm_diagnostic:
                 self._mav.request_prearm_diagnostic()
 

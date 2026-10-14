@@ -212,3 +212,46 @@ def test_diag_script_is_stdlib_and_read_only():
 
     for word in (r"\bsudo\b", r"\brestart\b", r'"start"', r'"stop"', r'"rm"', r"\bapt(-get)?\b", r"\bpip3?\b"):
         assert not re.search(word, src), word
+
+
+def test_blackbox_reports_the_header_it_found(tmp_path):
+    """When the first line differs, the actual columns are reported so the difference can be explained."""
+    import datetime
+    import time
+
+    now = time.time()
+    rows = ["timestamp,temp,throttled,ram_pct"]  # a header from another script version
+    for i in range(200):  # long enough that the header is outside the tail
+        ts = datetime.datetime.fromtimestamp(now - (199 - i) * 11).astimezone().isoformat(timespec="seconds")
+        rows.append(f"{ts},46.6,0x0,12,17,2.34,wifi,ok,fail,active,reachable,none,stopped,active")
+    f = tmp_path / "x500-blackbox-20261014.csv"
+    f.write_text("\n".join(rows) + "\n")
+    smp = col.sec_blackbox({"blackbox_globs": [str(tmp_path / "x500-blackbox-*.csv")]})["samples"]
+    assert smp["header_ok"] is False
+    assert smp["header_seen"] == ["timestamp", "temp", "throttled", "ram_pct"]
+    assert smp["valid_rows"] == 40
+    f.write_text("\n".join([",".join(col.BLACKBOX_HEADER)] + rows[1:]) + "\n")
+    smp = col.sec_blackbox({"blackbox_globs": [str(tmp_path / "x500-blackbox-*.csv")]})["samples"]
+    assert smp["header_ok"] is True and smp["header_seen"] is None
+
+
+def test_kernel_sensor_binding_from_sysfs(tmp_path, monkeypatch):
+    monkeypatch.setattr(col, "ROOT", str(tmp_path))
+    assert col._kernel_sensor("imx219") == {"driver": "imx219", "driver_loaded": False, "devices": []}
+    d = tmp_path / "sys/bus/i2c/drivers/imx219"
+    d.mkdir(parents=True)
+    for n in ("bind", "unbind", "uevent", "module"):
+        (d / n).write_text("")
+    assert col._kernel_sensor("imx219")["devices"] == []
+    (d / "4-0010").mkdir()
+    assert col._kernel_sensor("imx219") == {"driver": "imx219", "driver_loaded": True, "devices": ["4-0010"]}
+    acc = col._camera_access()
+    assert acc["media_devices"] == 0 and acc["media_access"] is None
+
+
+def test_poller_always_requests_tools_on_slow_cycle():
+    from x500fs.settings import PiSettings, VideoSettings
+    from x500fs.transport.pi_link import sections_for
+
+    assert "tools" in sections_for(PiSettings(), VideoSettings(), slow=True)
+    assert "tools" not in sections_for(PiSettings(), VideoSettings(), slow=False)

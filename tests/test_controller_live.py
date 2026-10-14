@@ -128,6 +128,24 @@ def test_live_end_to_end(live, tmp_path):
     assert doc["hardware"]["ssh_host_key"].startswith("SHA256:")
 
 
+def test_live_connect_reads_params_without_run_preflight(live):
+    """Parameters are read (read-only) right after connecting; the pre-arm command still waits for the button."""
+    ctl, rec, sshd, ap = live
+    ctl.connect()
+    assert wait(lambda: rec.hostkeys)
+    ctl.trust_pending_host_key()
+    assert wait(lambda: ctl.store.get("mav.param.ARMING_CHECK") is not None, 20)
+    assert wait(lambda: ctl.store.get("mav.param.BATT_MONITOR") is not None, 20)
+    assert ctl.preflight_started is None
+    res = {r.check_id: r for r in ctl.evaluate()[0]}
+    assert res["fc.arming_checks"].status is Status.PASS
+    assert res["batt.monitor"].status is not Status.UNKNOWN
+    sent = {t for _, _, t, _ in ap.received}
+    assert sent <= {"PARAM_REQUEST_READ", "COMMAND_LONG"}
+    cmds = [d.get("command") for _, _, t, d in ap.received if t == "COMMAND_LONG"]
+    assert 401 not in cmds  # MAV_CMD_RUN_PREARM_CHECKS only on "run preflight"
+
+
 def test_hostkey_rejection_disconnects(live):
     ctl, rec, sshd, ap = live
     ctl.connect()

@@ -162,7 +162,8 @@ def fc_arming_checks(ctx, cfg):
     kind, value, age = _arming_param(ctx)
     src = ctx.src("MAVLink PARAM_VALUE (קריאה בלבד)")
     if kind is None:
-        raise Unavailable(R(Status.UNKNOWN, "הפרמטרים ARMING_CHECK / ARMING_SKIPCHK לא נקראו מבקר הטיסה.",
+        raise Unavailable(R(Status.UNKNOWN, "הפרמטרים ARMING_CHECK / ARMING_SKIPCHK לא נקראו מבקר הטיסה."
+                            + ctx.param_unread_note("ARMING_CHECK", "ARMING_SKIPCHK"),
                             source=src, missing=("ARMING_CHECK",)))
     skipped = _skipped_checks(kind, value)
     allowed = set(cfg.get("allowed_skipped") or [])

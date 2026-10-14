@@ -279,6 +279,7 @@ def parse_blackbox_rows(lines, now_epoch):
     last_valid = valid[-1] if valid else None
     return {
         "header_ok": header == BLACKBOX_HEADER if header is not None else None,
+        "header_seen": header[:40] if header is not None and header != BLACKBOX_HEADER else None,
         "rows_checked": len(rows),
         "valid_rows": len(valid),
         "invalid_examples": [r["problems"] for r in rows if not r["valid"]][-3:],
@@ -678,8 +679,10 @@ def sec_blackbox(cfg):
         out["samples"] = parse_blackbox_rows(lines[-40:] if len(lines) > 40 else lines, now)
         if out["samples"]["header_ok"] is None:
             with open(newest[2], "r", encoding="utf-8", errors="replace") as f:
-                first = f.readline().strip().split(",")
+                first = f.readline(1024).strip().split(",")
             out["samples"]["header_ok"] = first == BLACKBOX_HEADER
+            if first != BLACKBOX_HEADER:
+                out["samples"]["header_seen"] = first[:40]
     return out
 
 
@@ -720,13 +723,41 @@ def sec_camera(cfg):
     rc, so, se = run([tool, "--list-cameras"], 12)
     text = so + "\n" + se
     cams = parse_list_cameras(text)
-    note = None
+    out = {"tool": os.path.basename(tool), "cameras": cams, "exit_code": rc, "note": None}
     if not cams:
         if "No cameras available" in text:
-            note = "No cameras available"
+            out["note"] = "No cameras available"
         elif rc is None:
-            note = se.strip()[:200]
-    return {"tool": os.path.basename(tool), "cameras": cams, "exit_code": rc, "note": note}
+            out["note"] = se.strip()[:200]
+        out["permission_denied"] = "Permission denied" in text
+        out.update(_camera_access())
+        out["kernel_sensor"] = _kernel_sensor("imx219")
+    return out
+
+
+def _camera_access():
+    """Can this (non-root) user open the camera devices? The video service runs as root."""
+    out = {"in_video_group": None, "media_devices": None, "media_access": None}
+    try:
+        import grp
+        gid = grp.getgrnam("video").gr_gid
+        out["in_video_group"] = os.getuid() == 0 or gid == os.getgid() or gid in os.getgroups()
+    except (ImportError, KeyError, OSError):
+        pass
+    devs = sorted(glob.glob(rp("/dev/media*")))
+    out["media_devices"] = len(devs)
+    if devs:
+        out["media_access"] = all(os.access(d, os.R_OK | os.W_OK) for d in devs)
+    return out
+
+
+def _kernel_sensor(driver):
+    """Read-only sysfs: is the sensor driver loaded, and did it bind to a device on I2C?"""
+    path = rp("/sys/bus/i2c/drivers/%s" % driver)
+    if not os.path.isdir(path):
+        return {"driver": driver, "driver_loaded": False, "devices": []}
+    devs = sorted(n for n in os.listdir(path) if re.match(r"^[0-9]+-[0-9a-f]{4}$", n))
+    return {"driver": driver, "driver_loaded": True, "devices": devs}
 
 
 def _http_json(url, timeout=2.0):
