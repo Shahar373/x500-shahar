@@ -137,3 +137,23 @@ def test_example_local_config_is_importable(tmp_path):
     store = SettingsStore(tmp_path / "cfg")
     plan = local_config.plan(local_config.read(ex), store.load(), store.profiles_dir)
     assert plan.changes and not plan.ignored
+
+
+def test_light_theme_even_when_windows_is_in_dark_mode(app):
+    """Windows dark mode used to give white text on the app's white backgrounds."""
+    from PySide6.QtGui import QColor, QPalette
+
+    from x500fs.ui.app import apply_light_theme
+
+    dark = QPalette()
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        dark.setColor(role, QColor("#ffffff"))
+    for role in (QPalette.Window, QPalette.Base, QPalette.Button):
+        dark.setColor(role, QColor("#202020"))
+    app.setPalette(dark)
+    apply_light_theme(app)
+    pal = app.palette()
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        assert pal.color(role).lightness() < 80, role       # dark text
+    for role in (QPalette.Window, QPalette.Base, QPalette.Button):
+        assert pal.color(role).lightness() > 220, role      # light backgrounds
