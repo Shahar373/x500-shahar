@@ -48,7 +48,7 @@ def test_plan_and_apply_merges_known_fields_only(tmp_path):
     ign = "\n".join(plan.ignored)
     assert "connection.bogus" in ign and "unknown_section" in ign
     assert "video.srt_port" in ign                         # wrong type ("5600" string) is not imported
-    assert "expected_params" in ign                        # failsafe/RTL expectations are not importable
+    assert "profile flight: expected_params.rtl: 1" in joined
     local_config.apply(plan, store)
     s2 = store.load()
     assert s2.connection.username == "pilot1" and s2.pi.zte_gateway == "10.9.8.1"
@@ -56,7 +56,8 @@ def test_plan_and_apply_merges_known_fields_only(tmp_path):
     assert s2.pi.services["extra"] == "x500-extra" and s2.pi.services["mavlink_router"] == "mavlink-router"
     prof, err = profile_mod.load("flight", store.profiles_dir)
     assert err is None and prof.battery["cells"] == 4 and prof.battery["capacity_mah"] == 5200
-    assert prof.expected_params.get("rtl") in ({}, None)   # still unconfigured
+    assert prof.expected_params["rtl"] == {"RTL_ALT": {"min": 1}}
+    assert profile_mod.load("bench", store.profiles_dir)[0].expected_params.get("rtl") in ({}, None)
     assert (store.profiles_dir / "flight.before-import.json").exists()
 
 
@@ -143,3 +144,43 @@ def test_settings_dialog_fits_small_screens(tmp_path):
     avail = app.primaryScreen().availableGeometry()
     assert d.height() <= avail.height()
     d.close()
+
+
+def test_expected_params_and_arming_exemption_import(tmp_path):
+    """The user approves the values read from the FC: they become expectations, the FC is not touched."""
+    from helpers import World
+
+    from x500fs.core.status import Status
+
+    doc = {"schema": local_config.SCHEMA, "profiles": {"bench": {
+        "expected_params": {"failsafe": {"FS_GCS_ENABLE": {"eq": 5}, "BATT_LOW_VOLT": {"eq": 14.4}},
+                            "fence": {"FENCE_RADIUS": {"eq": 50}}, "arming": {"ARMING_CHECK": {"eq": 1}}},
+        "checks": {"fc.arming_checks": {"allowed_skipped": ["RC"]}, "pi.storage": {"warn_free_mb": 1}}}}}
+    store = SettingsStore(tmp_path / "cfg")
+    plan = local_config.plan(local_config.read(_write(tmp_path, doc)), store.load(), store.profiles_dir)
+    ign = "\n".join(plan.ignored)
+    assert "expected_params.arming" in ign and "pi.storage" in ign     # only the whitelisted parts
+    local_config.apply(plan, store)
+    prof, err = profile_mod.load("bench", store.profiles_dir)
+    assert err is None
+    assert prof.expected_params["failsafe"]["FS_GCS_ENABLE"] == {"eq": 5}
+    assert prof.check("fc.arming_checks")["allowed_skipped"] == ["RC"]
+    assert prof.check("pi.storage")["warn_free_mb"] == 2048
+    # evaluated against the float values ArduPilot actually reports
+    w = World().healthy(params={"ARMING_SKIPCHK": 64, "FS_GCS_ENABLE": 5, "BATT_LOW_VOLT": 14.399999618530273,
+                                "FENCE_RADIUS": 50.0})
+    w.profile = prof
+    res, _ = w.evaluate()
+    assert res["fc.arming_checks"].status is Status.WARN                 # skipped, but explicitly allowed
+    assert res["cfg.failsafe"].status is Status.PASS and res["cfg.fence"].status is Status.PASS
+    w.put("mav.param.FS_GCS_ENABLE", {"value": 1})
+    res, _ = w.evaluate()
+    assert res["cfg.failsafe"].status is Status.FAIL
+
+
+def test_unknown_arming_name_is_rejected(tmp_path):
+    doc = {"schema": local_config.SCHEMA,
+           "profiles": {"bench": {"checks": {"fc.arming_checks": {"allowed_skipped": ["RADIO"]}}}}}
+    store = SettingsStore(tmp_path / "cfg")
+    with pytest.raises(local_config.LocalConfigError, match="RADIO"):
+        local_config.plan(local_config.read(_write(tmp_path, doc)), store.load(), store.profiles_dir)

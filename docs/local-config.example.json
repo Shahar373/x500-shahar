@@ -20,7 +20,13 @@
     }
   },
   "profiles": {
-    "bench": {"battery": {"chemistry": "LiPo", "cells": 4, "capacity_mah": 5000}},
+    "bench": {
+      "battery": {"chemistry": "LiPo", "cells": 4, "capacity_mah": 5000},
+      "expected_params": {
+        "rtl": {"RTL_ALT_M": {"eq": 15, "note": "example - use the values YOU decided on"}}
+      },
+      "checks": {"fc.arming_checks": {"allowed_skipped": ["RC"]}}
+    },
     "flight": {"battery": {"chemistry": "LiPo", "cells": 4, "capacity_mah": 5000}}
   }
 }
