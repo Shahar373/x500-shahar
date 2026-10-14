@@ -101,3 +101,45 @@ def test_local_config_files_are_gitignored():
 
     text = (Path(__file__).resolve().parents[1] / ".gitignore").read_text()
     assert "x500-local-config*.json" in text and "local/" in text
+
+
+def test_connect_refuses_unusable_auth_with_clear_message(tmp_path, monkeypatch):
+    from x500fs import credentials
+    from x500fs.controller import Controller, Listener
+
+    class Rec(Listener):
+        def __init__(self):
+            self.notices = []
+
+        def on_notice(self, level, text):
+            self.notices.append((level, text))
+
+    store = SettingsStore(tmp_path / "cfg")
+    s = store.load()
+    s.connection.host, s.connection.username, s.connection.auth_method, s.connection.key_path = \
+        "x500pi", "pilot1", "key", ""
+    store.save(s)
+    rec = Rec()
+    ctl = Controller(store, rec)
+    ctl.connect()
+    assert not ctl.connected and "קובץ מפתח" in rec.notices[-1][1]
+    ctl.settings.connection.auth_method = "password"
+    monkeypatch.setattr(credentials, "get", lambda ident: None)
+    ctl.connect()
+    assert not ctl.connected and "סיסמה" in rec.notices[-1][1]
+
+
+def test_settings_dialog_fits_small_screens(tmp_path):
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from x500fs.ui.app import create_application
+    from x500fs.ui.dialogs import SettingsDialog
+
+    app = create_application()
+    store = SettingsStore(tmp_path / "cfg")
+    d = SettingsDialog(store.load(), str(store.dir), str(store.profiles_dir))
+    assert d.minimumSizeHint().height() < 600     # tabs scroll instead of growing the dialog
+    avail = app.primaryScreen().availableGeometry()
+    assert d.height() <= avail.height()
+    d.close()

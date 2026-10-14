@@ -169,13 +169,13 @@ class SshSession:
                 raise AuthFailed("no password stored for this host")
             kwargs["password"] = a.password
         else:
-            if a.key_path:
-                kwargs["key_filename"] = a.key_path
-            else:
-                kwargs["look_for_keys"] = True
+            # Key mode uses exactly the chosen key file: no searching ~/.ssh, no SSH agent
+            # (the agent is its own explicit mode).
+            if not a.key_path:
+                raise AuthFailed("no key file selected")
+            kwargs["key_filename"] = a.key_path
             if a.passphrase:
                 kwargs["passphrase"] = a.passphrase
-            kwargs["allow_agent"] = True
         try:
             client.connect(**kwargs)
         except HostKeyUnknown:

@@ -6,10 +6,10 @@ import copy
 import json
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -67,15 +67,18 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, config_dir: str, profiles_dir: str, forget_hostkey=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("הגדרות")
-        self.resize(720, 620)
         self.s = copy.deepcopy(settings)
         self._forget_hostkey = forget_hostkey
         tabs = QTabWidget()
-        tabs.addTab(self._tab_connection(), "חיבור")
-        tabs.addTab(self._tab_mavlink(), "MAVLink")
-        tabs.addTab(self._tab_video(), "וידאו")
-        tabs.addTab(self._tab_pi(), "Pi")
-        tabs.addTab(self._tab_general(config_dir, profiles_dir), "כללי וסימולציה")
+        # Every tab scrolls, so the dialog (and its Save button) always fits on small screens.
+        for builder, title in ((self._tab_connection, "חיבור"), (self._tab_mavlink, "MAVLink"),
+                               (self._tab_video, "וידאו"), (self._tab_pi, "Pi"),
+                               (lambda: self._tab_general(config_dir, profiles_dir), "כללי וסימולציה")):
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QFrame.NoFrame)
+            area.setWidget(builder())
+            tabs.addTab(area, title)
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Save).setText("שמור")
         bb.button(QDialogButtonBox.Cancel).setText("ביטול")
@@ -87,6 +90,14 @@ class SettingsDialog(QDialog):
         note.setObjectName("disclaimer")
         lay.addWidget(note)
         lay.addWidget(bb)
+        self._fit_to_screen(760, 640)
+
+    def _fit_to_screen(self, width: int, height: int) -> None:
+        screen = (self.parent().screen() if self.parent() else None) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            width, height = min(width, int(avail.width() * 0.95)), min(height, int(avail.height() * 0.88))
+        self.resize(width, height)
 
     # --------------------------------------------------------------- tabs
     def _tab_connection(self):

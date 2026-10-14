@@ -163,8 +163,29 @@ class Controller:
                 self.listener.on_notice("error", "יש להגדיר כתובת ושם משתמש של ה-Pi בהגדרות לפני החיבור.")
                 self.listener.on_connection_changed()
                 return
+            problem = self.auth_problem()
+            if problem:
+                self.connected = False
+                self.listener.on_notice("error", problem)
+                self.listener.on_connection_changed()
+                return
             self._start_live()
         self.listener.on_connection_changed()
+
+    def auth_problem(self) -> str | None:
+        """A clear message when the chosen authentication cannot work, checked before connecting."""
+        c = self.settings.connection
+        if c.auth_method == "key":
+            if not c.key_path:
+                return ("נבחר אימות 'מפתח SSH' אבל לא נבחר קובץ מפתח. בהגדרות → חיבור: בחר קובץ מפתח, "
+                        "או שנה את 'אימות' ל'סיסמה', שמור סיסמה ולחץ 'שמור'.")
+            if not Path(c.key_path).is_file():
+                return f"קובץ המפתח לא נמצא: \u2066{c.key_path}\u2069"
+        if c.auth_method == "password" and not credentials.get(
+                credentials.password_id(c.username, c.host, c.ssh_port)):
+            return ("נבחר אימות 'סיסמה' אבל לא נשמרה סיסמה לכתובת ולמשתמש האלה. בהגדרות → חיבור: "
+                    "'שמור סיסמה / passphrase…', ואז 'שמור'.")
+        return None
 
     def _auth(self) -> SshAuth:
         c = self.settings.connection

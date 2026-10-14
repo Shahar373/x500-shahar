@@ -251,13 +251,32 @@ def _live_connect(tmp: Path):
     from .ui.dialogs import HostKeyDialog
     from .ui.main_window import MainWindow
 
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
     ap = MockAutopilot().start()
     sshd = MockSshd(forward_map={("127.0.0.1", 5760): ("127.0.0.1", ap.port)}).start()
     errors: list[str] = []
-    saved = (credentials.get, HostKeyDialog.exec, sys.excepthook, threading.excepthook)
+    saved = (credentials.get, sys.excepthook, threading.excepthook)
     prompts = []
-    credentials.get = lambda ident: sshd.password if ident.startswith("ssh-password") else None
-    HostKeyDialog.exec = lambda self: (prompts.append(1), 1)[1]
+    cred_ident = credentials.password_id(sshd.user, "127.0.0.1", sshd.port)
+    real_store = sys.platform == "win32"
+    if real_store:
+        # The real Windows Credential Manager, read later from the SSH worker thread (as in normal use).
+        credentials.set(cred_ident, sshd.password)
+    else:
+        credentials.get = lambda ident: sshd.password if ident.startswith("ssh-password") else None
+
+    def accept_hostkey_dialog():
+        # The real modal HostKeyDialog is shown; accept it like a user who compared the fingerprint.
+        dlg = QApplication.activeModalWidget()
+        if isinstance(dlg, HostKeyDialog):
+            prompts.append(dlg.windowTitle())
+            dlg.accept()
+    app = create_application()  # before any QTimer: timers need the application's event loop
+    clicker = QTimer()
+    clicker.timeout.connect(accept_hostkey_dialog)
+    clicker.start(300)
     sys.excepthook = lambda t, v, tb: errors.append("".join(traceback.format_exception(t, v, tb)))
     threading.excepthook = lambda a: errors.append(
         f"thread {a.thread.name if a.thread else '?'}: " +
@@ -272,7 +291,6 @@ def _live_connect(tmp: Path):
         s.reports_dir = str(tmp / "live-reports")
         s.first_run_done = True
         store.save(s)
-        app = create_application()
         w = MainWindow(store)
         w.show()
         w._toggle_connect()
@@ -302,13 +320,17 @@ def _live_connect(tmp: Path):
         sent = sorted({(t, d.get("command")) for _, _, t, d in ap.received}, key=str)
         if any(t == "HEARTBEAT" for t, _ in sent):
             raise RuntimeError("client sent HEARTBEAT")
-        return {"hostkey_prompts": len(prompts), "overall": overall.status.value,
+        return {"hostkey_prompts": len(prompts), "credential_store": "windows" if real_store else "patched",
+                "overall": overall.status.value,
                 "pi.reachable": res.get("pi.reachable"), "link.mavlink_heartbeat": res.get("link.mavlink_heartbeat"),
                 "fc.prearm": res.get("fc.prearm"), "ssh_commands": len(sshd.commands),
                 "forwards": [list(f) for f in sshd.forward_requests][:3], "report": Path(hp).name,
                 "client_sent": [list(x) for x in sent]}
     finally:
-        credentials.get, HostKeyDialog.exec, sys.excepthook, threading.excepthook = saved
+        clicker.stop()
+        credentials.get, sys.excepthook, threading.excepthook = saved
+        if real_store:
+            credentials.delete(cred_ident)
         if w is not None:
             try:
                 w.ctl.disconnect()
