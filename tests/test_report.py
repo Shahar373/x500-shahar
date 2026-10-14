@@ -120,3 +120,13 @@ def test_diagnostics_bundle_redacted(tmp_path):
         assert leaked not in text, leaked
     p = save_bundle(doc, tmp_path)
     assert p.exists() and p.name.startswith("x500fs-diagnostics-")
+
+
+def test_each_result_has_timestamp_and_age():
+    w = World().healthy()
+    results, _ = w.evaluate()
+    r = results["fc.armed"].to_dict()
+    assert r["age_s"] is not None and r["observed_at"] and r["evaluated_at"]
+    assert r["observed_at"] <= r["evaluated_at"]
+    assert results["batt.cells_config"].to_dict()["evaluated_at"]
+    assert "החיווט" in (results["pi.power_now"].limitations or "")

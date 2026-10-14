@@ -48,6 +48,8 @@ class CheckResult:
     limitations: str | None = None
     missing: tuple[str, ...] = ()
     evidence: dict[str, Any] = field(default_factory=dict)
+    observed_at: str | None = None   # local wall-clock time of the observation (laptop clock)
+    evaluated_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +63,8 @@ class CheckResult:
             "expected": self.expected,
             "source": self.source,
             "age_s": None if self.age_s is None else round(self.age_s, 2),
+            "observed_at": self.observed_at,
+            "evaluated_at": self.evaluated_at,
             "configured": self.configured,
             "limitations": self.limitations,
             "missing": list(self.missing),

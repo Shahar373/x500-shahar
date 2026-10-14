@@ -266,6 +266,12 @@ class FfmpegWorker(_BaseWorker):
                 pass
 
     def _read_stderr(self, pipe, raw_url: str, red_url: str) -> None:
+        try:
+            self._read_stderr_lines(pipe, raw_url, red_url)
+        except (ValueError, OSError):
+            pass  # pipe closed while the process was being torn down
+
+    def _read_stderr_lines(self, pipe, raw_url: str, red_url: str) -> None:
         section = None
         for raw in iter(pipe.readline, b""):
             line = raw.decode("utf-8", "replace").rstrip()
@@ -363,13 +369,13 @@ class FfmpegWorker(_BaseWorker):
                 proc.wait(timeout=5)
             except Exception:  # noqa: BLE001
                 pass
+            t_err.join(2.0)  # the process has exited, so stderr reaches EOF; join before closing
+            t_dog.join(1.0)
             for pipe in (proc.stdout, proc.stderr):
                 try:
                     pipe.close()
                 except Exception:  # noqa: BLE001
                     pass
-            t_err.join(1.0)
-            t_dog.join(1.0)
             self._proc = None
         if self._stop.is_set():
             return got

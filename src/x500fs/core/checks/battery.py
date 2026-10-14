@@ -83,7 +83,8 @@ def batt_voltage(ctx, cfg):
     return R(Status.PASS, "המתח מעל הספים המוגדרים.", observed=observed, expected=expected, source=src,
              age_s=age, evidence=ev,
              limitations="מתח במנוחה אינו מעיד על קיבולת או על מצב הסוללה תחת עומס. הקריאה תלויה בכיול מד הסוללה "
-                         "(BATT_VOLT_MULT) - ראו 'כיול מד הסוללה מול פרופיל צפוי'.")
+                         "(BATT_VOLT_MULT) - ראו 'כיול מד הסוללה מול פרופיל צפוי'. בדיקת תוכנה אינה מאשרת את מודול "
+                         "הכוח, החיווט או המחברים, ואינה רואה צניחות מתח מהירות בין דגימות הטלמטריה.")
 
 
 @check("batt.monitor", "battery", "הגדרת מד הסוללה (BATT_MONITOR)")

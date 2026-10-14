@@ -144,7 +144,7 @@ def render_html(doc: dict) -> str:
         if not rows:
             continue
         parts.append(f"<h3>{_e(CATEGORIES[cat])}</h3><table><thead><tr><th>סטטוס</th><th>בדיקה</th>"
-                     "<th>הסבר</th><th>נצפה</th><th>צפוי</th><th>מקור</th><th>גיל</th></tr></thead><tbody>")
+                     "<th>הסבר</th><th>נצפה</th><th>צפוי</th><th>מקור</th><th>גיל / זמן</th></tr></thead><tbody>")
         for r in rows:
             crit = " <span class='crit'>קריטי</span>" if r["critical"] else ""
             lim = f"<div class='lim'>מגבלה: {_e(r['limitations'])}</div>" if r.get("limitations") else ""
@@ -153,7 +153,8 @@ def render_html(doc: dict) -> str:
                 f"<div class='sth'>{_e(STATUS_TEXT.get(r['status']))}</div></td>"
                 f"<td>{_e(r['title'])}{crit}<div class='id'>{_e(r['id'])}</div></td>"
                 f"<td>{_e(r['explanation'])}{lim}</td><td>{_e(r['observed'])}</td><td>{_e(r['expected'])}</td>"
-                f"<td class='src'>{_e(r['source'])}</td><td>{_e(fmt_age(r['age_s']))}</td></tr>")
+                f"<td class='src'>{_e(r['source'])}</td><td>{_e(fmt_age(r['age_s']))}"
+                f"<div class='id'>{_e((r.get('observed_at') or '')[11:19])}</div></td></tr>")
         parts.append("</tbody></table>")
     manual_rows = "".join(
         f"<tr><td>{'✔' if i['confirmed'] else '✘'}</td><td>{_e(i['title'])}</td><td>{_e(i['detail'])}</td>"

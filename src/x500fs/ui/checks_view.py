@@ -127,6 +127,7 @@ class ChecksView(QWidget):
             ("צפוי", e(r.expected or "—")),
             ("מקור הנתון", e(r.source)),
             ("גיל התצפית", e(fmt_age(r.age_s))),
+            ("זמן התצפית", e(r.observed_at or "—")),
         ]
         if not r.configured:
             rows.append(("הגדרה", "<b>לא מוגדר</b> - יש להגדיר סף/ערך צפוי בפרופיל או בהגדרות"))

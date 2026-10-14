@@ -9,6 +9,8 @@ check can never PASS by accident.
 
 from __future__ import annotations
 
+import time
+
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -278,6 +280,8 @@ def evaluate(ctx: Ctx) -> list[CheckResult]:
     from . import catalog  # noqa: F401
 
     results: list[CheckResult] = []
+    wall = ctx.snap.now_wall
+    evaluated_at = _iso(wall)
     for d in REGISTRY:
         cfg = ctx.profile.check(d.id)
         enabled = cfg.get("enabled", True)
@@ -320,8 +324,15 @@ def evaluate(ctx: Ctx) -> list[CheckResult]:
             observed=r.observed, expected=r.expected, source=r.source,
             age_s=r.age_s, configured=r.configured, limitations=r.limitations,
             missing=tuple(r.missing), evidence=_jsonable(r.evidence),
+            # Ages come from monotonic receive times on this computer; the timestamp is derived
+            # from them, so a different clock on the Pi cannot skew it.
+            observed_at=None if r.age_s is None else _iso(wall - r.age_s), evaluated_at=evaluated_at,
         ))
     return results
+
+
+def _iso(t: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
 
 
 def _jsonable(obj: Any, depth: int = 0) -> Any:
