@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 
-DEFAULT_PATH = "/etc/x500/x500.conf"
+DEFAULT_PATH = os.environ.get("X500_CONF", "/etc/x500/x500.conf")
 MARKER_RE = re.compile(r"NOT_CONFIGURED|PI_USER|DEVICE_SERIAL_NOT_CONFIGURED")
 
 DEFAULTS = {
