@@ -82,9 +82,10 @@ class SshManager:
         backoff = 2.0
         while not self._stop.is_set():
             self._publish("connecting")
-            ssh = SshSession(self.host, self.port, self.user, self.auth_provider(), self.known_hosts,
-                             self.connect_timeout)
+            log.info("ssh: connecting to %s:%s", self.host, self.port)
             try:
+                ssh = SshSession(self.host, self.port, self.user, self.auth_provider(), self.known_hosts,
+                                 self.connect_timeout)
                 ssh.connect()
             except HostKeyUnknown as e:
                 self._publish("hostkey_unknown", str(e), e.fingerprint)
@@ -101,12 +102,21 @@ class SshManager:
                 self.session.event("error", "ssh", f"הזדהות נכשלה: {e}")
                 return
             except (SshError, OSError) as e:
+                log.info("ssh: connection failed: %s", e)
                 self._publish("failed", str(e))
                 self.session.link_down("ssh", str(e))
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 15.0)
                 continue
+            except Exception as e:  # noqa: BLE001 - anything else must be reported, never kill the worker
+                log.exception("ssh: unexpected error while connecting")
+                self._publish("failed", f"{type(e).__name__}: {e}")
+                self.session.link_down("ssh", f"{type(e).__name__}: {e}")
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, 15.0)
+                continue
             backoff = 2.0
+            log.info("ssh: connected (%s)", ssh.fingerprint)
             self._ssh = ssh
             self._connected.set()
             self._publish("connected", fingerprint=ssh.fingerprint)

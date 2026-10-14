@@ -34,6 +34,47 @@ def setup_logging(logs_dir) -> None:
     logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 
+_crash_file = None  # kept open for faulthandler for the life of the process
+
+
+def install_crash_handlers(logs_dir) -> None:
+    """Make every failure visible in the logs folder (the windowed exe has no console).
+
+    * native crashes (access violation etc.): Python stacks of all threads -> logs/crash.log
+    * uncaught Python exceptions in the UI thread or worker threads -> logs/x500fs.log
+    * a windowed PyInstaller exe has sys.stdout/sys.stderr = None; give them a file
+    """
+    global _crash_file
+    import faulthandler
+    import threading
+    import time
+    import traceback
+
+    log = logging.getLogger("x500fs.crash")
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        if sys.stdout is None or sys.stderr is None:
+            stdio = open(logs_dir / "stdio.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+            sys.stdout = sys.stdout or stdio
+            sys.stderr = sys.stderr or stdio
+        _crash_file = open(logs_dir / "crash.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        _crash_file.write(f"\n--- start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except OSError:
+        pass
+
+    def excepthook(exc_type, exc, tb):
+        log.critical("uncaught exception in the UI thread:\n%s",
+                     "".join(traceback.format_exception(exc_type, exc, tb)))
+
+    def thread_excepthook(args):
+        log.critical("uncaught exception in thread %s:\n%s", getattr(args.thread, "name", "?"),
+                     "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+    sys.excepthook = excepthook
+    threading.excepthook = thread_excepthook
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in argv:
@@ -62,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
     store = SettingsStore()
     setup_logging(store.logs_dir)
+    install_crash_handlers(store.logs_dir)
     logging.getLogger(__name__).info("starting %s", APP_NAME)
     app = create_application(sys.argv[:1])
     icon = app_icon()

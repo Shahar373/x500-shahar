@@ -55,7 +55,8 @@ jobs:
         run: |
           $p = Start-Process -FilePath "dist\X500FlightStation\X500FlightStation.exe" `
                -ArgumentList "--self-test", "$PWD\selftest-dist.json", "--offscreen" -Wait -PassThru
-          Get-Content selftest-dist.json
+          if (Test-Path selftest-dist.json) { Get-Content selftest-dist.json }
+          if (Test-Path selftest-dist.json.crash.log) { Write-Host "--- crash log ---"; Get-Content selftest-dist.json.crash.log }
           if ($p.ExitCode -ne 0) { throw "dist self-test failed: $($p.ExitCode)" }
 
       - name: Locate or install Inno Setup
@@ -100,11 +101,15 @@ jobs:
           }
           $proc = [System.Diagnostics.Process]::Start($psi)
           $proc.WaitForExit(300000) | Out-Null
+          if (Test-Path selftest-installed.json.crash.log) { Write-Host "--- crash log ---"; Get-Content selftest-installed.json.crash.log }
           Get-Content selftest-installed.json
           $json = Get-Content selftest-installed.json -Raw | ConvertFrom-Json
           if ($proc.ExitCode -ne 0 -or -not $json.ok -or -not $json.frozen) { throw "installed self-test failed" }
           $srt = ($json.steps | Where-Object { $_.name -eq "video_srt_end_to_end" }).detail
           if (-not $srt -or $srt.skipped -or $srt.frames -lt 30) { throw "SRT end-to-end decode was not verified: $($srt | ConvertTo-Json -Compress)" }
+          $live = ($json.steps | Where-Object { $_.name -eq "live_connect_ui" })
+          if (-not $live -or -not $live.ok) { throw "live connect (SSH + MAVLink tunnel + UI) failed: $($live | ConvertTo-Json -Compress -Depth 5)" }
+          Write-Host "Live connect: $($live.detail | ConvertTo-Json -Compress -Depth 5)"
           Write-Host "SRT end-to-end: $($srt.frames) frames, $($srt.source_size), $($srt.codec)"
           if (Get-Command python -ErrorAction SilentlyContinue) { Write-Host "note: python exists on the runner but was removed from the child PATH" }
           $shot = ($json.steps | Where-Object { $_.name -eq "gui_simulation_report" }).detail.screenshot
@@ -146,5 +151,6 @@ jobs:
           name: selftest-results
           path: |
             selftest-*.json
+            selftest-*.crash.log
             selftest-window.png
           if-no-files-found: warn

@@ -19,10 +19,20 @@ import traceback
 from pathlib import Path
 
 
+_crash_file = None
+
+
 def run_selftest(out_path: str | None, offscreen: bool = False) -> int:
     from . import __version__
 
     tmp = Path(tempfile.mkdtemp(prefix="x500fs-selftest-"))
+    if out_path:
+        import faulthandler
+
+        # A native crash leaves the Python stacks of every thread next to the result file.
+        global _crash_file
+        _crash_file = open(str(out_path) + ".crash.log", "w", encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(file=_crash_file, all_threads=True)
     os.environ["X500FS_CONFIG_DIR"] = str(tmp / "config")
     if offscreen:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -54,6 +64,7 @@ def run_selftest(out_path: str | None, offscreen: bool = False) -> int:
     step("video_decode_file", lambda: _video(tmp))
     step("video_srt_end_to_end", _video_srt)
     step("gui_simulation_report", lambda: _gui(tmp))
+    step("live_connect_ui", lambda: _live_connect(tmp))
     step("credential_backend", _credentials)
     report["ok"] = all(s["ok"] for s in report["steps"])
     text = json.dumps(report, ensure_ascii=False, indent=2)
@@ -224,6 +235,88 @@ def _gui(tmp: Path):
     _pump(app, 0.5)
     return {"overall": overall.status.value, "checks": len(results), "video_gate": gate.allowed,
             "sim_video_frames": frames, "report": Path(hp).name, "screenshot": str(shot)}
+
+
+def _live_connect(tmp: Path):
+    """The real 'Connect' path of the UI against an in-process SSH server and mock autopilot:
+    host-key prompt, password auth, collector over exec, MAVLink over the SSH tunnel, preflight, report."""
+    import threading
+    import traceback
+
+    from . import credentials
+    from .settings import SettingsStore
+    from .sim.mock_mavlink import MockAutopilot
+    from .sim.mock_sshd import MockSshd
+    from .ui.app import create_application
+    from .ui.dialogs import HostKeyDialog
+    from .ui.main_window import MainWindow
+
+    ap = MockAutopilot().start()
+    sshd = MockSshd(forward_map={("127.0.0.1", 5760): ("127.0.0.1", ap.port)}).start()
+    errors: list[str] = []
+    saved = (credentials.get, HostKeyDialog.exec, sys.excepthook, threading.excepthook)
+    prompts = []
+    credentials.get = lambda ident: sshd.password if ident.startswith("ssh-password") else None
+    HostKeyDialog.exec = lambda self: (prompts.append(1), 1)[1]
+    sys.excepthook = lambda t, v, tb: errors.append("".join(traceback.format_exception(t, v, tb)))
+    threading.excepthook = lambda a: errors.append(
+        f"thread {a.thread.name if a.thread else '?'}: " +
+        "".join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
+    w = None
+    try:
+        store = SettingsStore(tmp / "live-config")
+        s = store.load()
+        s.simulation = False
+        s.connection.host, s.connection.ssh_port = "127.0.0.1", sshd.port
+        s.connection.username, s.connection.auth_method = sshd.user, "password"
+        s.reports_dir = str(tmp / "live-reports")
+        s.first_run_done = True
+        store.save(s)
+        app = create_application()
+        w = MainWindow(store)
+        w.show()
+        w._toggle_connect()
+        ctl = w.ctl
+
+        def ready():
+            ssh = ctl.store.get("pi.ssh")
+            return (ssh is not None and ssh.value.get("state") == "connected"
+                    and ctl.store.get("mav.msg.HEARTBEAT") is not None and ctl.store.get("pi.collector") is not None)
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not ready():
+            _pump(app, 0.2)
+        if not ready():
+            ssh = ctl.store.get("pi.ssh")
+            raise RuntimeError(f"not connected: ssh={ssh.value if ssh else None} prompts={len(prompts)} "
+                               f"heartbeat={ctl.store.get('mav.msg.HEARTBEAT') is not None} "
+                               f"collector_error={ctl.store.get('pi.collector_error')}")
+        w._run_preflight()
+        _pump(app, 4.0)
+        results, overall, snap = ctl.evaluate()
+        res = {r.check_id: r.status.value for r in results}
+        jp, hp = ctl.export_report()
+        ctl.disconnect()
+        _pump(app, 1.0)
+        if errors:
+            raise RuntimeError("uncaught exception: " + errors[0][-1500:])
+        sent = sorted({(t, d.get("command")) for _, _, t, d in ap.received}, key=str)
+        if any(t == "HEARTBEAT" for t, _ in sent):
+            raise RuntimeError("client sent HEARTBEAT")
+        return {"hostkey_prompts": len(prompts), "overall": overall.status.value,
+                "pi.reachable": res.get("pi.reachable"), "link.mavlink_heartbeat": res.get("link.mavlink_heartbeat"),
+                "fc.prearm": res.get("fc.prearm"), "ssh_commands": len(sshd.commands),
+                "forwards": [list(f) for f in sshd.forward_requests][:3], "report": Path(hp).name,
+                "client_sent": [list(x) for x in sent]}
+    finally:
+        credentials.get, HostKeyDialog.exec, sys.excepthook, threading.excepthook = saved
+        if w is not None:
+            try:
+                w.ctl.disconnect()
+                w.close()
+            except Exception:  # noqa: BLE001
+                pass
+        sshd.stop()
+        ap.stop()
 
 
 def _pump(app, seconds: float) -> None:

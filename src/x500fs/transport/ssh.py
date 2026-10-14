@@ -70,8 +70,8 @@ class KnownHosts:
             if f and f.is_file():
                 try:
                     hk.load(str(f))
-                except (OSError, paramiko.SSHException) as e:
-                    log.warning("cannot read known_hosts %s: %s", f, e)
+                except Exception as e:  # noqa: BLE001 - unreadable file = no keys from it, never a crash
+                    log.warning("cannot read known_hosts %s: %s: %s", f, type(e).__name__, e)
         return hk
 
     def lookup(self, host: str, port: int) -> dict[str, paramiko.PKey]:
@@ -143,13 +143,18 @@ class SshSession:
         client = paramiko.SSHClient()
         # Load keys into the client's *host* key table (read-only use);
         # we never call client.save_host_keys().
+        # A user's ~/.ssh/known_hosts written by Windows OpenSSH may contain lines (or an
+        # encoding) paramiko cannot parse; that must never stop the connection attempt.
         if self.known_hosts.system_file and self.known_hosts.system_file.is_file():
             try:
                 client.load_system_host_keys(str(self.known_hosts.system_file))
-            except (OSError, paramiko.SSHException) as e:
-                log.warning("cannot read %s: %s", self.known_hosts.system_file, e)
+            except Exception as e:  # noqa: BLE001
+                log.warning("cannot read %s: %s: %s", self.known_hosts.system_file, type(e).__name__, e)
         if self.known_hosts.app_file.is_file():
-            client.load_host_keys(str(self.known_hosts.app_file))
+            try:
+                client.load_host_keys(str(self.known_hosts.app_file))
+            except Exception as e:  # noqa: BLE001
+                log.warning("cannot read %s: %s: %s", self.known_hosts.app_file, type(e).__name__, e)
         client.set_missing_host_key_policy(_RaiseOnUnknown(self.port))
         kwargs = dict(
             hostname=self.host, port=self.port, username=self.username,
