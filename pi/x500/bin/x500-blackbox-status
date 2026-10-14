@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""X500 black-box status (corrected).
+
+* Healthy needs BOTH the service active AND a recent valid sample.
+* The sampling period is measured from the samples (probe time + sleep).
+* Retention is reported as configured (BLACKBOX_RETENTION_DAYS) and as the
+  oldest file actually present - the old fixed "Retention: 14 days" line was
+  not backed by any deletion job.
+Exit codes: 0 healthy, 1 stale or degraded, 2 service down / no valid samples / unknown.
+"""
+
+import os
+import sys
+
+LIB = os.environ.get("X500FS_LIB", "/opt/x500fs/lib")
+sys.path.insert(0, os.path.join(LIB, "x500fs", "pi_side"))
+import x500fs_collector as C  # noqa: E402
+
+C.ROOT = os.environ.get("X500FS_ROOT", "/")  # test hook
+CONF = os.environ.get("X500_CONF", "/etc/x500/x500.conf")
+
+
+def main():
+    conf = {}
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            conf = C.parse_shell_vars(f.read())
+    except OSError:
+        pass
+    logdir = conf.get("BLACKBOX_DIR") or "/var/log/x500/blackbox"
+    interval = float(conf.get("BLACKBOX_INTERVAL") or 10)
+    retention = conf.get("BLACKBOX_RETENTION_DAYS") or ""
+    cfg = dict(C.DEFAULT_CONFIG)
+    cfg["blackbox_globs"] = [logdir.rstrip("/") + "/x500-blackbox-*.csv"]
+    cfg["services"] = {"blackbox": "x500-blackbox"}
+    svc = (C.sec_services(cfg).get("units") or {}).get("x500-blackbox") or {}
+    bb = C.sec_blackbox(cfg)
+    s = bb.get("samples") or {}
+    print("============================")
+    print(" X500 Black Box Status")
+    print("============================\n")
+    active = svc.get("ActiveState")
+    print("Service:       %s" % (active or "unavailable (%s)" % " ".join(str(svc.get("error", "")).split())[:80]))
+    print("Files:         %s (%.2f MB)" % (bb.get("file_count"), bb.get("total_mb") or 0))
+    print("Oldest file:   %s" % (bb.get("oldest_file") or "none"))
+    newest = bb.get("newest") or {}
+    print("Newest file:   %s" % (newest.get("path") or "none"))
+    age = s.get("last_valid_age_s")
+    print("Last valid sample age: %s" % ("none" if age is None else "%.0fs" % age))
+    print("Valid rows in tail:    %s / %s" % (s.get("valid_rows"), s.get("rows_checked")))
+    if s.get("invalid_examples"):
+        print("Invalid examples:      %s" % s["invalid_examples"])
+    if s.get("header_ok") is False:
+        print("Header:        UNEXPECTED (columns differ from the logger)")
+    iv = s.get("interval_s") or {}
+    if iv.get("median") is not None:
+        print("Measured period:       median %.1fs (min %.1fs, max %.1fs, n=%d); target %gs"
+              % (iv["median"], iv["min"], iv["max"], iv["count"], interval))
+    else:
+        print("Measured period:       not enough samples (target %gs)" % interval)
+    vals = s.get("last_valid_values") or {}
+    if vals:
+        print("\nLatest values:")
+        for k in ("temp_c", "throttled", "ram_pct", "disk_pct", "load1", "uplink", "wifi_internet",
+                  "lte_internet", "tailscale", "ground", "video_profile", "video_state", "mavlink"):
+            print("  %-14s %s" % (k + ":", vals.get(k)))
+    print("\nRetention:     " + ("delete daily files older than %s days (BLACKBOX_RETENTION_DAYS)" % retention
+                                 if retention.isdigit() and int(retention) > 0
+                                 else "none configured - files are kept until deleted"))
+    print("\n============================")
+    limit = max(3 * interval, 30.0)
+    if active != "active" or age is None:
+        print("Logging:       NOT HEALTHY (service %s, %s)" % (active or "unknown",
+              "no valid sample" if age is None else "sample age %.0fs" % age))
+        return 2
+    if age > limit:
+        print("Logging:       STALE (last valid sample older than %.0fs)" % limit)
+        return 1
+    print("Logging:       HEALTHY (service active and a valid sample %.0fs ago)" % age)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

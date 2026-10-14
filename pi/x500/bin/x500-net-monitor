@@ -1,0 +1,32 @@
+#!/bin/bash
+# X500 network monitor (corrected): logs to the journal on state changes.
+# Settings: /etc/x500/x500.conf. Unset addresses are logged as not_configured.
+CONF="${X500_CONF:-/etc/x500/x500.conf}"
+[ -r "$CONF" ] && . "$CONF"
+WIFI_IF="${WIFI_IF:-wlan0}"; LTE_IF="${LTE_IF:-eth1}"
+PING_TARGET="${PING_TARGET:-1.1.1.1}"; GROUND="${GROUND_IP:-}"; GW="${ZTE_GATEWAY:-}"
+case "$GROUND" in *NOT_CONFIGURED*) GROUND="" ;; esac
+case "$GW" in *NOT_CONFIGURED*) GW="" ;; esac
+
+icmp() {  # target [iface] -> ok|fail|missing
+    if [ -n "${2:-}" ] && ! ip link show "$2" >/dev/null 2>&1; then echo missing; return; fi
+    local args=(-n -c1 -W1); [ -n "${2:-}" ] && args+=(-I "$2")
+    if ping "${args[@]}" "$1" >/dev/null 2>&1; then echo ok; else echo fail; fi
+}
+
+last=""
+while true; do
+    DEV=$(ip route get "$PING_TARGET" 2>/dev/null | sed -nE 's/.* dev ([^ ]+).*/\1/p' | head -1)
+    ACTIVE="${DEV:-none}"
+    WIFI=$(icmp "$PING_TARGET" "$WIFI_IF")
+    if [ -n "$GW" ]; then ZTE=$(icmp "$GW" "$LTE_IF"); else ZTE=not_configured; fi
+    LTE=$(icmp "$PING_TARGET" "$LTE_IF")
+    TS=$(systemctl is-active tailscaled 2>/dev/null); TS=${TS:-unknown}
+    if [ -n "$GROUND" ]; then GROUND_STATE=$(icmp "$GROUND"); else GROUND_STATE=not_configured; fi
+    current="route=$ACTIVE wifi_icmp=$WIFI zte_icmp=$ZTE lte_icmp=$LTE tailscale=$TS ground_icmp=$GROUND_STATE"
+    if [ "$current" != "$last" ]; then
+        logger -t x500-net-monitor "$current"
+        last="$current"
+    fi
+    sleep 10
+done

@@ -652,6 +652,39 @@ class Controller:
                     f"SRT latency {p['latency_us'] // 1000}ms (requested, not measured)")
         return f"{v.width}x{v.height}@{v.fps}"
 
+    def export_diagnostics(self, directory: Path | None = None, journal_lines: int = 40) -> Path:
+        """Explicit user action: read-only Pi diagnostics + collector + session log, redacted, saved locally."""
+        from . import diagnostics
+
+        pi_diag, err = None, None
+        if self.simulation:
+            err = "simulation mode - no Pi diagnostics"
+        else:
+            try:
+                ssh = self._ssh.wait_session(5.0) if self._ssh else None
+                if ssh is None:
+                    raise SshError("SSH not connected")
+                pi_diag = diagnostics.run_pi_diag(ssh, self.settings.pi.python, journal_lines)
+            except Exception as e:  # noqa: BLE001
+                err = f"{type(e).__name__}: {e}"
+        col = self.store.get("pi.collector")
+        secrets = []
+        c = self.settings.connection
+        for ident in (credentials.password_id(c.username, c.host, c.ssh_port),
+                      credentials.passphrase_id(c.key_path) if c.key_path else None):
+            if ident and not self.simulation:
+                val = credentials.get(ident)
+                if val:
+                    secrets.append(val)
+        doc = diagnostics.build_bundle(
+            pi_diag, err, col.value if col else None, [e.to_dict() for e in self.session.events()],
+            [i.to_dict() for i in self.session.interruptions()], self.settings_summary(), self.simulation,
+            extra_secrets=secrets + [c.username, c.host] if not self.simulation else secrets,
+            private=self.settings.report_hide_private)
+        path = diagnostics.save_bundle(doc, directory or self.settings.reports_path())
+        self.session.event("info", "app", f"ייצוא אבחון נשמר: {path.name}")
+        return path
+
     def export_report(self, directory: Path | None = None) -> tuple[Path, Path]:
         results, overall, snap = self.evaluate()
         secrets = []
@@ -675,6 +708,6 @@ class Controller:
             interruptions=[i.to_dict() for i in self.session.interruptions()],
             events=[e.to_dict() for e in self.session.events()], statustext=list(self.statustext),
             video=video, session_id=self.session.session_id, preflight_started=self.preflight_started,
-            extra_secrets=secrets,
+            extra_secrets=secrets, private=self.settings.report_hide_private,
         )
         return save_report(doc, directory or self.settings.reports_path())

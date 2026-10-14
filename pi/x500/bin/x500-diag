@@ -1,0 +1,6 @@
+#!/bin/bash
+# x500-diag - corrected: read-only diagnostics printed to stdout as JSON (nothing is written
+# on the Pi). Redirect it yourself if you want a file:  x500-diag > ~/diag.json
+# The desktop app offers the same export (Settings menu), with private details masked.
+LIB="${X500FS_LIB:-/opt/x500fs/lib}"
+exec python3 -I "$LIB/x500fs/pi_side/x500fs_diag.py" "$@"

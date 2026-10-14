@@ -1,0 +1,48 @@
+#!/bin/bash
+# X500 network status (corrected). Settings: /etc/x500/x500.conf
+# Each line says what it measures: interface state, selected route, ICMP to the
+# modem gateway, ICMP to the Internet per interface, Tailscale, ICMP to the
+# ground station. ICMP replies are reachability only - not MAVLink link quality.
+CONF="${X500_CONF:-/etc/x500/x500.conf}"
+[ -r "$CONF" ] && . "$CONF"
+WIFI_IF="${WIFI_IF:-wlan0}"; LTE_IF="${LTE_IF:-eth1}"; TAILSCALE_IF="${TAILSCALE_IF:-tailscale0}"
+PING_TARGET="${PING_TARGET:-1.1.1.1}"; GROUND="${GROUND_IP:-}"; GW="${ZTE_GATEWAY:-}"
+case "$GROUND" in *NOT_CONFIGURED*) GROUND="" ;; esac
+case "$GW" in *NOT_CONFIGURED*) GW="" ;; esac
+
+icmp() {  # $1 label, $2 target, $3 optional interface
+    local args=(-n -c1 -W2)
+    [ -n "${3:-}" ] && args+=(-I "$3")
+    if ping "${args[@]}" "$2" >/dev/null 2>&1; then printf '%-28s reply\n' "$1:"; else printf '%-28s no reply\n' "$1:"; fi
+}
+
+echo "============================"
+echo " X500 Network Status"
+echo "============================"
+echo
+echo "[INTERFACES]"
+for i in "$WIFI_IF" "$LTE_IF" "$TAILSCALE_IF"; do ip -br addr show "$i" 2>/dev/null || echo "$i missing"; done
+echo
+echo "[DEFAULT ROUTES]"
+ip route show default
+echo
+echo "[SELECTED ROUTE to $PING_TARGET]"
+ip route get "$PING_TARGET" 2>/dev/null | head -1 || echo "No route"
+echo
+echo "[ICMP REACHABILITY]"
+if ip link show "$WIFI_IF" >/dev/null 2>&1; then icmp "Internet via $WIFI_IF" "$PING_TARGET" "$WIFI_IF"; else echo "$WIFI_IF: interface missing"; fi
+if ip link show "$LTE_IF" >/dev/null 2>&1; then
+    if [ -n "$GW" ]; then icmp "ZTE gateway ($LTE_IF)" "$GW" "$LTE_IF"; else printf '%-28s not configured (ZTE_GATEWAY)\n' "ZTE gateway:"; fi
+    icmp "Internet via $LTE_IF" "$PING_TARGET" "$LTE_IF"
+else
+    echo "$LTE_IF: interface missing"
+fi
+if [ -n "$GROUND" ]; then icmp "Ground station" "$GROUND"; else printf '%-28s not configured (GROUND_IP)\n' "Ground station:"; fi
+echo
+echo "[TAILSCALE]"
+echo "Service:       $(systemctl is-active tailscaled 2>/dev/null)"
+TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "Local IPv4:    ${TSIP:-unavailable}"
+echo
+echo "Note: ICMP shows reachability only. MAVLink link quality is measured by the desktop app."
+echo "============================"

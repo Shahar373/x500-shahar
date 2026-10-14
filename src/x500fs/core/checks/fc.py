@@ -247,6 +247,11 @@ def fc_prearm(ctx, cfg):
         return R(Status.UNKNOWN, "בדיקות החימוש מושבתות, לכן ביט ה-Pre-arm אינו מעיד על דבר.",
                  observed=f"{ltr(kind)}={ltr(value)}", expected="בדיקות מופעלות ו-Pre-arm תקין",
                  source=src, age_s=age, limitations=limits, evidence=ev)
+    hb = ctx.msg("HEARTBEAT")
+    if hb and P.is_armed(hb[0]):
+        return R(Status.UNKNOWN, "הרחפן חמוש: ArduPilot מדווח את ביט ה-Pre-arm כתקין תמיד במצב חמוש, לכן אין כאן מידע.",
+                 observed="ARMED", expected="DISARMED + PREARM_CHECK תקין", source=src, age_s=age,
+                 limitations=limits, evidence=ev)
     if not pa["present"]:
         return R(Status.UNKNOWN, "הקושחה אינה מדווחת מצב Pre-arm ב-SYS_STATUS. היעדר הודעות PreArm אינו הוכחה.",
                  observed="PREARM_CHECK לא מדווח", expected="PREARM_CHECK תקין", source=src, age_s=age,

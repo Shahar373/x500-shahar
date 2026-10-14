@@ -50,6 +50,12 @@ class DroneConfig:
     ping_target_configured: bool = False
     zte_gateway_configured: bool = False
     ground_ip_configured: bool = False
+    evaluator: str = "desktop"         # desktop (the app) | pi_local (x500-preflight on the Pi)
+
+
+# Checks that measure the desktop app's own link/view. On the Pi they cannot be
+# observed, so x500-preflight reports them as not applicable (and says so).
+DESKTOP_ONLY = {"pi.reachable", "link.path", "link.rtt", "link.interruptions", "video.stream"}
 
 
 @dataclass
@@ -282,6 +288,15 @@ def evaluate(ctx: Ctx) -> list[CheckResult]:
                 status=Status.NOT_APPLICABLE, critical=False,
                 explanation="הבדיקה מושבתת בפרופיל הנוכחי.",
                 source="profile", configured=True,
+            ))
+            continue
+        if ctx.drone.evaluator == "pi_local" and d.id in DESKTOP_ONLY:
+            results.append(CheckResult(
+                check_id=d.id, category=d.category, title=d.title,
+                status=Status.NOT_APPLICABLE, critical=False,
+                explanation="Measured only by the desktop app (its own SSH/MAVLink/video link); "
+                            "not observable from the Pi. / נמדד רק מהאפליקציה במחשב.",
+                source="x500-preflight (Pi)", configured=True,
             ))
             continue
         try:

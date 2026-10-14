@@ -297,6 +297,9 @@ class SettingsDialog(QDialog):
         self.sim.setChecked(self.s.simulation)
         self.scenario = _combo(list(SCENARIOS.items()), self.s.sim_scenario)
         self.reports = _ltr_edit(self.s.reports_dir, r"Documents\X500FlightStation\reports")
+        self.hide_private = QCheckBox("הסתר פרטים פרטיים בדוחות ובייצוא האבחון (כתובות IP, MAC, מספר סידורי של "
+                                      "ה-Pixhawk, שם משתמש, שם רשת Wi-Fi)")
+        self.hide_private.setChecked(self.s.report_hide_private)
         open_cfg = QPushButton("פתח תיקיית הגדרות")
         open_cfg.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(config_dir)))
         open_prof = QPushButton("פתח תיקיית פרופילים (bench.json / flight.json)")
@@ -304,6 +307,7 @@ class SettingsDialog(QDialog):
         f.addRow(self.sim)
         f.addRow("תרחיש סימולציה", self.scenario)
         f.addRow("תיקיית דוחות", self.reports)
+        f.addRow(self.hide_private)
         f.addRow(open_cfg)
         f.addRow(open_prof)
         cfg_lbl = QLabel(f"הגדרות: ⁦{config_dir}⁩")
@@ -437,6 +441,7 @@ class SettingsDialog(QDialog):
         s.simulation = self.sim.isChecked()
         s.sim_scenario = self.scenario.currentData()
         s.reports_dir = self.reports.text().strip()
+        s.report_hide_private = self.hide_private.isChecked()
         s.first_run_done = True
         self.accept()
 

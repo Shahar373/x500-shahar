@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -99,6 +100,12 @@ class MainWindow(QMainWindow):
         self._fill_profiles()
         self.profile_combo.currentIndexChanged.connect(self._profile_changed)
         tb.addWidget(self.profile_combo)
+        tb.addSeparator()
+        self.act_diag = QAction("ייצוא אבחון", self)
+        self.act_diag.setToolTip("פעולה מפורשת: אוסף מה-Pi מידע לאבחון (קריאה בלבד, לא נכתב דבר ב-Pi), "
+                                 "מסתיר סודות ופרטים פרטיים ושומר קובץ במחשב.")
+        self.act_diag.triggered.connect(self._export_diagnostics)
+        tb.addAction(self.act_diag)
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -231,6 +238,24 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(hp)))
+
+    def _export_diagnostics(self) -> None:
+        if QMessageBox.question(
+                self, "ייצוא אבחון",
+                "לאסוף מידע אבחון מה-Pi? הפקודות לקריאה בלבד ולא נכתב דבר ב-Pi. הקובץ נשמר בתיקיית הדוחות במחשב, "
+                "בלי סיסמאות, ועם הסתרת כתובות ומספרים סידוריים אם האפשרות פעילה בהגדרות.") != QMessageBox.Yes:
+            return
+        self.act_diag.setEnabled(False)
+
+        def work():
+            try:
+                path = self.ctl.export_diagnostics()
+                self.bridge.on_notice("info", f"ייצוא האבחון נשמר: \u2066{path}\u2069")
+            except Exception as e:  # noqa: BLE001
+                self.bridge.on_notice("warning", f"ייצוא האבחון נכשל: {e}")
+        t = threading.Thread(target=work, name="diag-export", daemon=True)
+        t.start()
+        QTimer.singleShot(3000, lambda: self.act_diag.setEnabled(True))
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.ctl.settings, str(self.ctl.settings_store.dir),

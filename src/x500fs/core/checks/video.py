@@ -88,6 +88,10 @@ def video_pi_service(ctx, cfg):
         parts.append(f"UDP {ltr(port)}: " + ("מאזין" if listening else ("לא מאזין" if listening == [] else "לא ידוע")))
     observed = " · ".join(parts)
     ev = {k: data.get(k) for k in ("active_profile", "units", "progress", "config", "udp_listening")}
+    if not active and units and all(isinstance(u, dict) and "error" in u for u in units.values()):
+        err = next(iter(units.values())).get("error")
+        raise Unavailable(R(Status.UNKNOWN, f"לא ניתן לקרוא את מצב x500-video ב-Pi: {ltr(err)}", source=src,
+                            age_s=age, evidence=ev))
     max_prog_age = num(cfg.get("progress_max_age_s")) or 3.0
     if not active:
         if required:

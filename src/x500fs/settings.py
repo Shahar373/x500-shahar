@@ -160,6 +160,7 @@ class Settings:
     sim_scenario: str = "healthy"
     profile_id: str = "bench"
     reports_dir: str = ""
+    report_hide_private: bool = True   # mask IPs, MACs, USB serials, home user, SSIDs in reports/diagnostics
     connection: ConnectionSettings = field(default_factory=ConnectionSettings)
     mavlink: MavlinkSettings = field(default_factory=MavlinkSettings)
     video: VideoSettings = field(default_factory=VideoSettings)

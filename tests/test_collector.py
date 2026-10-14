@@ -138,3 +138,77 @@ def test_collector_source_is_stdlib_only():
             mode = node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "mode"), None)
             if mode is not None:
                 assert isinstance(mode, ast.Constant) and not set(mode.value) & set("wax+"), ast.dump(node)
+
+
+def test_collector_new_sections_on_fake_root(tmp_path):
+    """Snapshot-derived sections: watchdog config vs proof, black-box samples, video config, FC by-id."""
+    import datetime
+    import os
+    import time
+
+    root = _fake_root(tmp_path)
+    (root / "etc/systemd/system.conf.d").mkdir(parents=True)
+    (root / "etc/systemd/system.conf.d/60-x500-watchdog.conf").write_text(
+        "[Manager]\nRuntimeWatchdogSec=15s\nRebootWatchdogSec=2min\n")
+    wd = root / "sys/class/watchdog/watchdog0"
+    wd.mkdir(parents=True)
+    (wd / "identity").write_text("bcm2835-wdt\n")
+    (wd / "state").write_text("active\n")
+    (wd / "timeout").write_text("15\n")
+    bb = root / "var/log/x500/blackbox"
+    bb.mkdir(parents=True)
+    now = time.time()
+    hdr = ",".join(col.BLACKBOX_HEADER)
+    rows = [hdr]
+    for i in range(5):
+        ts = datetime.datetime.fromtimestamp(now - (4 - i) * 12).astimezone().isoformat(timespec="seconds")
+        rows.append(f"{ts},50.1,0x0,20,40,0.2,wifi,ok,fail,active,not_configured,none,stopped,active")
+    rows.append("2026-10-14T10:00:00,,throttled=0x0,20,40,0.2,wifi,ok,fail,active,x,none,stopped,active")  # legacy bad row
+    (bb / "x500-blackbox-20261014.csv").write_text("\n".join(rows) + "\n")
+    (root / "etc/x500").mkdir(parents=True)
+    (root / "etc/x500/video.conf").write_text("GROUND_IP=GROUND_STATION_IP_NOT_CONFIGURED\nPORT=5600\n")
+    byid = root / "dev/serial/by-id"
+    byid.mkdir(parents=True)
+    (root / "dev/ttyACM0").write_text("")
+    os.symlink(root / "dev/ttyACM0", byid / "usb-Holybro_Pixhawk6C_1C003C000851333239393235-if00")
+    cfg = {"blackbox_globs": ["/var/log/x500/blackbox/x500-blackbox-*.csv"], "services": {}}
+    out = subprocess.run(
+        [sys.executable, "-I", str(COLLECTOR), "--root", str(root), "--no-commands",
+         "--only", "watchdog,blackbox,video,fc_usb",
+         "--config-b64", __import__("base64").b64encode(json.dumps(cfg).encode()).decode()],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    s = json.loads(out.stdout)["sections"]
+    w = s["watchdog"]["data"]
+    assert any("RuntimeWatchdogSec=15s" in c["line"] for c in w["configured_in_files"])
+    assert w["devices"][0]["state"] == "active"
+    assert w["last_ping_age_s"] is None            # no runtime proof without systemd -> not invented
+    smp = s["blackbox"]["data"]["samples"]
+    assert smp["header_ok"] is True
+    assert smp["valid_rows"] == 5 and smp["invalid_examples"]          # empty temp / bad throttle / naive ts
+    assert smp["interval_s"]["median"] == 12.0
+    assert smp["last_valid_age_s"] < 60
+    v = s["video"]["data"]
+    assert v["config"]["PORT"] == "5600" and v["config"]["GROUND_IP_set"] is False
+    assert v["active_profile"] is None
+    fc = s["fc_usb"]["data"]
+    assert fc["matches"][0]["by_id"].endswith("-if00") and fc["matches"][0]["target"] == "ttyACM0"
+
+
+def test_diag_script_is_stdlib_and_read_only():
+    import ast
+
+    src = (COLLECTOR.parent / "x500fs_diag.py").read_text()
+    tree = ast.parse(src)
+    mods = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods.add(node.module.split(".")[0])
+    assert mods <= set(sys.stdlib_module_names) | {"__future__"}
+    assert "open(" in src and '"w"' not in src and "'w'" not in src and "write_text" not in src
+    import re
+
+    for word in (r"\bsudo\b", r"\brestart\b", r'"start"', r'"stop"', r'"rm"', r"\bapt(-get)?\b", r"\bpip3?\b"):
+        assert not re.search(word, src), word

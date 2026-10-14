@@ -23,6 +23,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -219,8 +220,15 @@ def parse_shell_vars(text):
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k.strip()):
-            out[k.strip()] = v.strip().strip('"').strip("'")
+        k = k.strip()
+        if k.startswith("export "):
+            k = k[7:].strip()
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
+            try:
+                parts = shlex.split(v, comments=True)  # quotes and trailing comments
+                out[k] = parts[0] if parts else ""
+            except ValueError:
+                out[k] = v.strip().strip('"').strip("'")
     return out
 
 

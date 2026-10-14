@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""X500 Raspberry Pi health (corrected version of the legacy bash script).
+
+Same interface: human output, --key, --machine (plus --json). Differences:
+* A failed temperature or throttle read is "unavailable" - never temp=0 or
+  throttled=0x0 - and the overall state is then UNKNOWN, never OK.
+* Current power flags (bits 0-3) and flags since boot (bits 16-19) are reported
+  separately: a current fault is CRITICAL, past events are a visible WARN.
+Exit codes: 0 OK, 1 WARN, 2 CRITICAL or UNKNOWN (an unknown is never a pass).
+"""
+
+import json
+import os
+import sys
+
+LIB = os.environ.get("X500FS_LIB", "/opt/x500fs/lib")
+sys.path.insert(0, os.path.join(LIB, "x500fs", "pi_side"))
+import x500fs_collector as C  # noqa: E402
+
+C.ROOT = os.environ.get("X500FS_ROOT", "/")  # test hook: read /sys, /proc from another root
+
+TEMP_WARN, TEMP_CRIT = 75.0, 82.0
+RAM_WARN = 90.0
+DISK_WARN, DISK_CRIT = 85.0, 95.0
+RANK = {"OK": 0, "WARN": 1, "UNKNOWN": 2, "CRITICAL": 3}
+
+
+def evaluate():
+    doc = C.collect(dict(C.DEFAULT_CONFIG), ["thermal", "power", "memory", "storage", "cpu"])
+
+    def sec(name):
+        s = doc["sections"].get(name) or {}
+        return (s.get("data") or {}) if s.get("ok") else {}
+
+    th, pw, mem, st, cpu = sec("thermal"), sec("power"), sec("memory"), sec("storage"), sec("cpu")
+    h = {"state": "OK"}
+
+    def worse(state):
+        if RANK[state] > RANK[h["state"]]:
+            h["state"] = state
+
+    temp = th.get("cpu_temp_c")
+    h["temp_c"] = temp
+    if temp is None:
+        h["temp"] = "unavailable"
+        h["temp_error"] = th.get("vcgencmd_error")
+        worse("UNKNOWN")
+    elif temp >= TEMP_CRIT:
+        h["temp"] = "critical"
+        worse("CRITICAL")
+    elif temp >= TEMP_WARN:
+        h["temp"] = "warn"
+        worse("WARN")
+    else:
+        h["temp"] = "normal"
+
+    thr = pw.get("throttled")
+    h["throttled_raw"] = pw.get("throttled_raw")
+    if thr is None:
+        h["power"] = h["power_hist"] = "unavailable"
+        h["power_error"] = pw.get("vcgencmd_error")
+        worse("UNKNOWN")
+    else:
+        h["throttled"] = "0x%x" % thr
+        h["power"] = "current_fault" if thr & 0xF else "normal"
+        h["power_hist"] = "events" if thr & 0xF0000 else "none"
+        h["power_flags"] = pw.get("throttled_decoded")
+        if thr & 0xF:
+            worse("CRITICAL")
+        elif thr & 0xF0000:
+            worse("WARN")
+
+    avail = mem.get("available_pct")
+    h["ram_used_pct"] = None if avail is None else round(100.0 - avail, 1)
+    if avail is None:
+        h["ram"] = "unavailable"
+        worse("UNKNOWN")
+    elif 100.0 - avail >= RAM_WARN:
+        h["ram"] = "warn"
+        worse("WARN")
+    else:
+        h["ram"] = "normal"
+
+    root = next((m for m in st.get("mounts") or [] if m.get("path") == "/"), None)
+    if not root or not root.get("total_mb"):
+        h["disk"], h["disk_used_pct"] = "unavailable", None
+        worse("UNKNOWN")
+    else:
+        used = round(100.0 * (1 - root["free_mb"] / root["total_mb"]), 1)
+        h["disk_used_pct"] = used
+        h["disk"] = "critical" if used >= DISK_CRIT else ("warn" if used >= DISK_WARN else "normal")
+        worse({"critical": "CRITICAL", "warn": "WARN", "normal": "OK"}[h["disk"]])
+    la = cpu.get("loadavg")
+    h["load1"] = la[0] if isinstance(la, list) and la else None
+    h["cores"] = os.cpu_count()
+    return h
+
+
+def fmt(v, unit=""):
+    return "unavailable" if v is None else "%s%s" % (v, unit)
+
+
+def main(argv):
+    h = evaluate()
+    arg = argv[1] if len(argv) > 1 else ""
+    if arg == "--key":
+        print("state=%s temp=%s power=%s power_hist=%s ram=%s disk=%s"
+              % (h["state"], h["temp"], h["power"], h["power_hist"], h["ram"], h["disk"]))
+    elif arg == "--machine":
+        print("state=%s temp=%s power=%s ram=%s disk=%s load=%s cores=%s"
+              % (h["state"], fmt(h["temp_c"], "C"), h.get("throttled_raw") or "unavailable",
+                 fmt(h["ram_used_pct"], "%"), fmt(h["disk_used_pct"], "%"), fmt(h["load1"]), h["cores"]))
+    elif arg == "--json":
+        print(json.dumps(h, indent=1))
+    else:
+        print("============================")
+        print(" X500 Pi Health")
+        print("============================\n")
+        print("Overall:       %s\n" % h["state"])
+        print("Temperature:   %s [%s]%s" % (fmt(h["temp_c"], " C"), h["temp"],
+                                            ("  (%s)" % h["temp_error"]) if h.get("temp_error") else ""))
+        print("Power now:     %s [%s]" % (h.get("throttled_raw") or "unavailable", h["power"]))
+        print("Since boot:    [%s]%s" % (h["power_hist"],
+                                         ("  (%s)" % h["power_error"]) if h.get("power_error") else ""))
+        print("RAM used:      %s [%s]" % (fmt(h["ram_used_pct"], "%"), h["ram"]))
+        print("Disk used /:   %s [%s]" % (fmt(h["disk_used_pct"], "%"), h["disk"]))
+        print("Load (1 min):  %s / %s cores" % (fmt(h["load1"]), h["cores"]))
+        print("\n============================")
+    return {"OK": 0, "WARN": 1}.get(h["state"], 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

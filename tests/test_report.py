@@ -87,3 +87,36 @@ def test_simulation_report_is_marked(tmp_path):
     assert "סימולציה - הנתונים בדוח זה מדומים" in html
     assert all(r["source"].startswith("SIM") for r in doc["automatic_checks"]["results"]
                if r["source"] not in ("profile", "") and r["status"] != "NOT_APPLICABLE")
+
+
+def test_private_details_are_masked():
+    from x500fs.core.redact import redact, redact_private_text
+
+    text = ("ssh pi@100.101.12.34 via 192.168.0.1 dev eth1; mac dc:a6:32:12:34:56; "
+            "/dev/serial/by-id/usb-Holybro_Pixhawk6C_1C003C000851333239393235-if00; /home/shahar/x500-venv/bin/python; "
+            "\n\tSSID: MyHomeWiFi\nfd7a:115c:a1e0::1234 ; ping 1.1.1.1 ; 127.0.0.1:5760 ; ArduPilot 4.6.3 at 10:00:00")
+    out = redact_private_text(text)
+    for leaked in ("12.34", "0.1 dev", "12:34:56", "1C003C000851333239393235", "shahar", "MyHomeWiFi", "a1e0"):
+        assert leaked not in out, (leaked, out)
+    for kept in ("1.1.1.1", "127.0.0.1:5760", "ArduPilot 4.6.3", "usb-Holybro_Pixhawk6C_***-if00", "/home/<user>",
+                 "10:00:00", "dc:a6:32:**:**:**", "fd7a:****"):
+        assert kept in out, (kept, out)
+    doc = redact({"wifi": {"ssid": "MyHomeWiFi", "signal_dbm": -60}, "host": "100.101.12.34"}, private=True)
+    assert doc["wifi"]["ssid"] == "***" and doc["host"] == "100.101.*.*" and doc["wifi"]["signal_dbm"] == -60
+    assert redact({"host": "100.101.12.34"})["host"] == "100.101.12.34"   # secrets-only mode keeps addresses
+
+
+def test_diagnostics_bundle_redacted(tmp_path):
+    from x500fs.diagnostics import build_bundle, save_bundle
+
+    pi = {"items": {"ip_addr": {"stdout": "wlan0 UP 192.168.1.23/24\ntailscale0 UP 100.70.1.2/32"},
+                    "x500_conf": 'GROUND_IP="100.80.9.9"\nX500_VENV_PYTHON="/home/shahar/venv/bin/python"',
+                    "serial_by_id": ["usb-Holybro_Pixhawk6C_1C003C000851333239393235-if00"],
+                    "journal": {"x": {"stdout": "password=hunter2 tskey-auth-abcdef"}}}}
+    doc = build_bundle(pi, None, {"sections": {}}, [], [], {"host": "100.70.1.2", "ssh_user": "shahar"}, False,
+                       extra_secrets=["shahar"])
+    text = json.dumps(doc)
+    for leaked in ("192.168.1.23", "100.70.1.2", "100.80.9.9", "shahar", "1C003C0008513332", "hunter2", "abcdef"):
+        assert leaked not in text, leaked
+    p = save_bundle(doc, tmp_path)
+    assert p.exists() and p.name.startswith("x500fs-diagnostics-")

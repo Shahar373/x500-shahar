@@ -77,7 +77,7 @@ def build_report(*, snap: Snapshot, results: list[CheckResult], overall: Overall
                  profile_error: str | None, settings_summary: dict, manual: list[dict], manual_done: int,
                  manual_total: int, interruptions: list[dict], events: list[dict], statustext: list[dict],
                  video: dict | None, session_id: str, preflight_started: float | None,
-                 extra_secrets: list[str] | None = None) -> dict[str, Any]:
+                 extra_secrets: list[str] | None = None, private: bool = True) -> dict[str, Any]:
     missing = []
     for r in results:
         for m in r.missing:
@@ -120,8 +120,11 @@ def build_report(*, snap: Snapshot, results: list[CheckResult], overall: Overall
         "autopilot_messages": statustext[-100:],
         "video": video,
         "disclaimer": DISCLAIMER,
+        "redaction": {"secrets": True, "private_details": private,
+                      "note": "IP addresses, MAC addresses, USB serial numbers, home-directory names and SSIDs "
+                              "are masked" if private else "only secrets are removed"},
     }
-    return redact(doc, extra_secrets)
+    return redact(doc, extra_secrets, private=private)
 
 
 def _e(v: Any) -> str:

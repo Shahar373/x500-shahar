@@ -1,0 +1,68 @@
+#!/bin/bash
+# X500 flight-controller detection (corrected): read-only; never opens the serial port.
+# Compares what is present with FC_BYID_GLOB / EXPECTED_FC_BYID from /etc/x500/x500.conf.
+CONF="${X500_CONF:-/etc/x500/x500.conf}"
+[ -r "$CONF" ] && . "$CONF"
+GLOB="${FC_BYID_GLOB:-usb-Holybro_Pixhawk6C_*-if00}"
+EXPECTED="${EXPECTED_FC_BYID:-}"
+case "$EXPECTED" in *NOT_CONFIGURED*) EXPECTED="" ;; esac
+
+echo "================================"
+echo " X500 Flight Controller Detect"
+echo "================================"
+echo
+echo "[SERIAL BY-ID]"
+if [ -d /dev/serial/by-id ] && compgen -G "/dev/serial/by-id/*" >/dev/null; then
+    ls -l /dev/serial/by-id/
+else
+    echo "No /dev/serial/by-id devices found"
+fi
+echo
+echo "[CONFIGURED IDENTITY]"
+echo "Pattern:       $GLOB"
+shopt -s nullglob
+MATCHES=(/dev/serial/by-id/$GLOB)
+shopt -u nullglob
+if [ "${#MATCHES[@]}" -eq 0 ]; then
+    echo "Match:         NONE - no device matches the configured pattern"
+elif [ "${#MATCHES[@]}" -gt 1 ]; then
+    echo "Match:         AMBIGUOUS - ${#MATCHES[@]} devices match; set EXPECTED_FC_BYID"
+    printf '  %s\n' "${MATCHES[@]}"
+else
+    echo "Match:         ${MATCHES[0]} -> $(readlink -f "${MATCHES[0]}")"
+fi
+if [ -n "$EXPECTED" ]; then
+    if [ -e "/dev/serial/by-id/$EXPECTED" ]; then echo "Expected:      present ($EXPECTED)"
+    else echo "Expected:      MISSING ($EXPECTED)"; fi
+else
+    echo "Expected:      not configured (EXPECTED_FC_BYID)"
+fi
+ROUTER_DEV=$(grep -hE '^\s*Device\s*=' /etc/mavlink-router/main.conf /etc/mavlink-router/config.d/*.conf 2>/dev/null | head -1 | sed -E 's/^\s*Device\s*=\s*//')
+echo "Router device: ${ROUTER_DEV:-not found in mavlink-router config}"
+case "$ROUTER_DEV" in *NOT_CONFIGURED*) echo "               WARNING: router config still contains a reference marker" ;; esac
+
+echo
+echo "[CANDIDATE DEVICES]"
+FOUND=0
+for dev in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -e "$dev" ] || continue
+    FOUND=1
+    echo
+    echo "Device: $dev"
+    udevadm info --query=property --name="$dev" 2>/dev/null \
+        | grep -E '^(ID_VENDOR=|ID_VENDOR_ID=|ID_MODEL=|ID_MODEL_ID=|ID_SERIAL_SHORT=)' || true
+done
+[ "$FOUND" -eq 0 ] && echo "No ttyACM/ttyUSB flight-controller candidates found"
+
+echo
+echo "[USER ACCESS]"
+U="${SUDO_USER:-$USER}"
+echo "User:          $U"
+if id -nG "$U" | grep -qw dialout; then echo "Serial access: OK (dialout)"; else echo "Serial access: user is not in dialout (only matters for direct access; the router owns the port)"; fi
+echo
+echo "[MAVLINK ROUTER]"
+echo "Installed:     $(command -v mavlink-routerd 2>/dev/null || echo no)"
+echo "Service:       $(systemctl is-active mavlink-router 2>/dev/null)"
+echo "Enabled:       $(systemctl is-enabled mavlink-router 2>/dev/null)"
+echo
+echo "================================"

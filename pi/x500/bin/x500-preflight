@@ -1,0 +1,15 @@
+#!/bin/bash
+# x500-preflight [bench|flight] - corrected: runs the shared x500fs evaluation layer
+# (the same checks as the desktop app) with the Pi venv Python (pymavlink).
+# Exit codes: 0 PASS, 1 PASS WITH WARNINGS, 2 FAIL or INCOMPLETE (never a pass when evidence is missing).
+CONF="${X500_CONF:-/etc/x500/x500.conf}"
+PY=""
+[ -r "$CONF" ] && PY=$(sed -nE 's/^X500_VENV_PYTHON="?([^"#]*)"?.*/\1/p' "$CONF" | tail -1 | tr -d ' ')
+case "$PY" in *PI_USER*|*NOT_CONFIGURED*) PY="" ;; esac
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+    echo "x500-preflight: X500_VENV_PYTHON is not set (or not executable) in $CONF." >&2
+    echo "Set it to the Python of the venv that has pymavlink, e.g. /home/<user>/x500-venv/bin/python" >&2
+    exit 2
+fi
+export PYTHONPATH="${X500FS_LIB:-/opt/x500fs/lib}${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m x500fs.pi_tools.preflight "$@"

@@ -1,0 +1,91 @@
+#!/bin/bash
+# X500 black-box logger (corrected). Settings: /etc/x500/x500.conf
+# * Unavailable readings are written as NA (never empty, never 0).
+# * Interfaces, ping target and ground address come from the config; an unset
+#   ground address is logged as not_configured, not as unreachable.
+# * The sleep subtracts the probe time, so the period approaches BLACKBOX_INTERVAL;
+#   x500-blackbox-status reports the period actually measured.
+# * Old files are deleted only if BLACKBOX_RETENTION_DAYS is set explicitly.
+set -u
+
+CONF="${X500_CONF:-/etc/x500/x500.conf}"
+[ -r "$CONF" ] && . "$CONF"
+
+LOGDIR="${BLACKBOX_DIR:-/var/log/x500/blackbox}"
+INTERVAL="${BLACKBOX_INTERVAL:-10}"
+WIFI_IF="${WIFI_IF:-wlan0}"
+LTE_IF="${LTE_IF:-eth1}"
+PING_TARGET="${PING_TARGET:-1.1.1.1}"
+GROUND="${GROUND_IP:-}"
+RETENTION="${BLACKBOX_RETENTION_DAYS:-}"
+HEADER="timestamp,temp_c,throttled,ram_pct,disk_pct,load1,uplink,wifi_internet,lte_internet,tailscale,ground,video_profile,video_state,mavlink"
+
+case "$GROUND" in *NOT_CONFIGURED*) GROUND="" ;; esac
+
+mkdir -p "$LOGDIR"
+
+probe_iface() {   # $1 = interface; prints ok|fail|missing
+    if ! ip link show "$1" >/dev/null 2>&1; then echo missing; return; fi
+    if ping -n -I "$1" -c1 -W1 "$PING_TARGET" >/dev/null 2>&1; then echo ok; else echo fail; fi
+}
+
+last_prune=""
+while true; do
+    t0=$(date +%s%N)
+    FILE="$LOGDIR/x500-blackbox-$(date '+%Y%m%d').csv"
+    [ -f "$FILE" ] || echo "$HEADER" > "$FILE"
+    TIMESTAMP=$(date --iso-8601=seconds)
+
+    TEMP=NA
+    raw=$(vcgencmd measure_temp 2>/dev/null) && [[ "$raw" =~ temp=([0-9]+(\.[0-9]+)?) ]] && TEMP="${BASH_REMATCH[1]}"
+    THR=NA
+    raw=$(vcgencmd get_throttled 2>/dev/null) && [[ "$raw" =~ throttled=(0x[0-9A-Fa-f]+) ]] && THR="${BASH_REMATCH[1]}"
+    RAM=$(free | awk '/^Mem:/ && $2 > 0 {printf "%.0f", ($3/$2)*100}'); RAM=${RAM:-NA}
+    DISK=$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}'); DISK=${DISK:-NA}
+    LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null); LOAD=${LOAD:-NA}
+
+    DEV=$(ip route get "$PING_TARGET" 2>/dev/null | sed -nE 's/.* dev ([^ ]+).*/\1/p' | head -1)
+    if [ -z "$DEV" ]; then UPLINK=none
+    elif [ "$DEV" = "$WIFI_IF" ]; then UPLINK=wifi
+    elif [ "$DEV" = "$LTE_IF" ]; then UPLINK=lte
+    else UPLINK="$DEV"
+    fi
+    WIFI=$(probe_iface "$WIFI_IF")
+    LTE=$(probe_iface "$LTE_IF")
+    TS=$(systemctl is-active tailscaled 2>/dev/null); TS=${TS:-unknown}
+    if [ -z "$GROUND" ]; then GROUND_STATE=not_configured
+    elif ping -n -c1 -W1 "$GROUND" >/dev/null 2>&1; then GROUND_STATE=reachable
+    else GROUND_STATE=unreachable
+    fi
+
+    VIDEO_PROFILE=none
+    VIDEO_STATE=stopped
+    for P in high normal degraded; do
+        STATE=$(systemctl show "x500-video@$P.service" -p ActiveState --value 2>/dev/null)
+        if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+            VIDEO_PROFILE="$P"
+            PROGRESS="/run/x500-video-${P}.progress"
+            VIDEO_STATE=waiting
+            if [ -f "$PROGRESS" ]; then
+                AGE=$(( $(date +%s) - $(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0) ))
+                # encoder output is progressing - NOT proof that a viewer shows a live picture
+                [ "$AGE" -le 3 ] && VIDEO_STATE=encoding
+            fi
+            break
+        fi
+    done
+    MAVLINK=$(systemctl is-active mavlink-router 2>/dev/null); MAVLINK=${MAVLINK:-unknown}
+
+    echo "$TIMESTAMP,$TEMP,$THR,$RAM,$DISK,$LOAD,$UPLINK,$WIFI,$LTE,$TS,$GROUND_STATE,$VIDEO_PROFILE,$VIDEO_STATE,$MAVLINK" >> "$FILE"
+
+    today=$(date +%Y%m%d)
+    if [[ "$RETENTION" =~ ^[0-9]+$ ]] && [ "$RETENTION" -gt 0 ] && [ "$last_prune" != "$today" ]; then
+        find "$LOGDIR" -maxdepth 1 -name 'x500-blackbox-*.csv' -mtime +"$RETENTION" -delete 2>/dev/null
+        last_prune="$today"
+    fi
+
+    elapsed_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+    sleep_ms=$(( INTERVAL * 1000 - elapsed_ms ))
+    [ "$sleep_ms" -lt 1000 ] && sleep_ms=1000
+    sleep "$(awk -v ms="$sleep_ms" 'BEGIN {printf "%.3f", ms/1000}')"
+done

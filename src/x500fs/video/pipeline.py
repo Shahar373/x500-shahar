@@ -49,7 +49,11 @@ def pipeline_summary(snap, worker_status: dict | None, simulated: bool = False) 
         out["encoder"] = ("לא ידוע", UNKNOWN)
     else:
         active = data.get("active_profile")
-        if not active:
+        units = data.get("units") or {}
+        if not active and units and all(isinstance(u, dict) and "error" in u for u in units.values()):
+            out["service"] = ("לא ידוע · systemctl נכשל", UNKNOWN)
+            out["encoder"] = ("לא ידוע", UNKNOWN)
+        elif not active:
             out["service"] = (f"כבוי · {fmt_age(age)}", OFF)
             out["encoder"] = ("—", OFF)
         else:

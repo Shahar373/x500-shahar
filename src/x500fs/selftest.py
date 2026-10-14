@@ -105,7 +105,7 @@ def _pi_scripts():
     from .pi_side import script_source
 
     out = {}
-    for name in ("x500fs_collector.py", "x500fs_camera.py"):
+    for name in ("x500fs_collector.py", "x500fs_camera.py", "x500fs_diag.py"):
         src = script_source(name)
         compile(src, name, "exec")
         out[name] = len(src)
