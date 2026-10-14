@@ -22,3 +22,9 @@ known_hosts
 id_*
 reports/
 selftest-*.json
+
+# Site-specific connection details (addresses, user names, paths) stay on your computer.
+# Import them in the app (Settings -> General -> Import settings) instead of committing them.
+local/
+*.local.json
+x500-local-config*.json

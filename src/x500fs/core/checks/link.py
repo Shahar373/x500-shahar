@@ -271,8 +271,71 @@ def link_ground(ctx, cfg):
     if g.get("ok"):
         return R(Status.PASS, "ה-Pi מגיע לכתובת תחנת הקרקע (ICMP).", observed=observed, expected="ping מצליח",
                  source=src, age_s=age, evidence=g, limitations=lim)
-    return R(Status.WARN, "ה-Pi לא מגיע לכתובת תחנת הקרקע (ICMP). ייתכן שחומת אש חוסמת ICMP.", observed=observed,
-             expected="ping מצליח", source=src, age_s=age, evidence=g, limitations=lim)
+    return R(Status.WARN, "ה-Pi לא קיבל תשובה מכתובת תחנת הקרקע (ICMP). חומת האש של Windows חוסמת ping נכנס "
+             "כברירת מחדל, ולכן אין תשובה אינו מוכיח שאין קשר. אם החיבור של האפליקציה עובד, זה בדרך כלל המצב.",
+             observed=observed, expected="ping מצליח", source=src, age_s=age, evidence=g, limitations=lim)
+
+
+@check("link.config_verify", "link", "אימות הכתובות שהוגדרו (שער ZTE, תחנת קרקע)")
+def link_config_verify(ctx, cfg):
+    """Compare configured addresses with what the Pi actually observes (fix 10: verify, don't guess)."""
+    gw_cfg, ground_cfg = ctx.drone.zte_gateway.strip(), ctx.drone.ground_ip.strip()
+    src = ctx.src("Pi collector · ip route + SSH_CONNECTION + ping")
+    if not gw_cfg and not ground_cfg:
+        return R(Status.NOT_APPLICABLE, "לא הוגדרו שער ZTE או כתובת תחנת קרקע.", source=src, configured=False)
+    data, age = ctx.require_section("network")
+    try:
+        _, _, probes = _probes(ctx)
+    except Unavailable:
+        probes = {}
+    parts, verdicts = [], []
+    ev = {"configured": {"zte_gateway": gw_cfg, "ground_ip": ground_cfg}}
+    if gw_cfg:
+        lte = ctx.drone.lte_interface or "eth1"
+        gws = sorted({r.get("gateway") for r in data.get("default_routes") or []
+                      if r.get("dev") == lte and r.get("gateway")})
+        ping = probes.get("zte_gateway") or {}
+        ev["zte"] = {"route_gateways": gws, "ping": ping}
+        if gws and gw_cfg in gws:
+            parts.append(f"שער ZTE {ltr(gw_cfg)}: תואם לנתיב דרך {ltr(lte)}")
+            verdicts.append("ok")
+        elif gws:
+            parts.append(f"שער ZTE {ltr(gw_cfg)}: בטבלת הניתוב דרך {ltr(lte)} השער הוא {ltr(', '.join(gws))}")
+            verdicts.append("mismatch")
+        elif ping.get("ok"):
+            parts.append(f"שער ZTE {ltr(gw_cfg)}: עונה ל-ping דרך {ltr(lte)} (אין נתיב ברירת מחדל דרכו לאימות נוסף)")
+            verdicts.append("ok")
+        else:
+            parts.append(f"שער ZTE {ltr(gw_cfg)}: לא ניתן לאמת (אין נתיב דרך {ltr(lte)} ואין תשובה ל-ping)")
+            verdicts.append("unknown")
+    if ground_cfg:
+        arrival = data.get("ssh_arrival") or {}
+        ping = probes.get("ground_station") or {}
+        ev["ground"] = {"arrival": arrival, "ping": ping}
+        client = arrival.get("client_ip")
+        if arrival.get("kind") == "tailscale" and client:
+            if client == ground_cfg:
+                parts.append(f"תחנת קרקע {ltr(ground_cfg)}: זו הכתובת שהמחשב מתחבר ממנה ב-Tailscale")
+                verdicts.append("ok")
+            else:
+                parts.append(f"תחנת קרקע {ltr(ground_cfg)}: המחשב מתחבר ב-Tailscale מ-{ltr(client)}")
+                verdicts.append("mismatch")
+        elif ping.get("ok"):
+            parts.append(f"תחנת קרקע {ltr(ground_cfg)}: עונה ל-ping (החיבור הנוכחי לא ב-Tailscale, לכן לא אומת שזה המחשב הזה)")
+            verdicts.append("unknown")
+        else:
+            parts.append(f"תחנת קרקע {ltr(ground_cfg)}: לא ניתן לאמת בנתיב הנוכחי (התחבר ב-Tailscale כדי לאמת)")
+            verdicts.append("unknown")
+    observed = " · ".join(parts)
+    lim = "האימות משווה את מה שהוגדר למה שה-Pi רואה. הוא לא משנה שום הגדרה, לא ב-Pi ולא במודם."
+    if "mismatch" in verdicts:
+        return R(Status.WARN, "כתובת שהוגדרה לא תואמת את מה שה-Pi רואה. עדכן אותה בהגדרות → Pi.", observed=observed,
+                 expected="הכתובות שהוגדרו תואמות לנתיבים בפועל", source=src, age_s=age, evidence=ev, limitations=lim)
+    if all(v == "ok" for v in verdicts):
+        return R(Status.PASS, "הכתובות שהוגדרו אומתו מול מה שה-Pi רואה.", observed=observed,
+                 expected="הכתובות שהוגדרו תואמות לנתיבים בפועל", source=src, age_s=age, evidence=ev, limitations=lim)
+    return R(Status.UNKNOWN, "לא כל הכתובות שהוגדרו ניתנות לאימות כרגע.", observed=observed,
+             expected="הכתובות שהוגדרו תואמות לנתיבים בפועל", source=src, age_s=age, evidence=ev, limitations=lim)
 
 
 @check("link.mavlink_heartbeat", "link", "HEARTBEAT מבקר הטיסה")

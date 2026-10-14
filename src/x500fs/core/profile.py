@@ -102,6 +102,9 @@ def _validate(doc: Any, origin: str) -> list[str]:
         chem = battery.get("chemistry")
         if chem is not None and chem not in ("LiPo", "LiPoHV", "LiIon"):
             errs.append(f"{origin}: battery.chemistry must be null, LiPo, LiPoHV or LiIon")
+        cap = battery.get("capacity_mah")
+        if cap is not None and (not isinstance(cap, int) or isinstance(cap, bool) or not 100 <= cap <= 100000):
+            errs.append(f"{origin}: battery.capacity_mah must be null or an integer 100..100000")
     exp = doc.get("expected_params", {})
     if not isinstance(exp, dict):
         errs.append(f"{origin}: 'expected_params' must be an object")

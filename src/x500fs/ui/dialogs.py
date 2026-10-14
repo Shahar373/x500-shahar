@@ -304,18 +304,31 @@ class SettingsDialog(QDialog):
         open_cfg.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(config_dir)))
         open_prof = QPushButton("פתח תיקיית פרופילים (bench.json / flight.json)")
         open_prof.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(profiles_dir)))
+        imp = QPushButton("ייבוא הגדרות מקובץ מקומי…")
+        imp.setToolTip("קובץ JSON עם פרטי החיבור (כתובות, שם משתמש, נתיבים) ונתוני הסוללה. "
+                       "הקובץ נשאר במחשב שלך ולא עולה לשום מקום. סיסמאות לא נשמרות בו.")
+        imp.clicked.connect(self._choose_import)
         f.addRow(self.sim)
         f.addRow("תרחיש סימולציה", self.scenario)
         f.addRow("תיקיית דוחות", self.reports)
         f.addRow(self.hide_private)
         f.addRow(open_cfg)
         f.addRow(open_prof)
+        f.addRow(imp)
         cfg_lbl = QLabel(f"הגדרות: ⁦{config_dir}⁩")
         cfg_lbl.setObjectName("disclaimer")
         f.addRow(cfg_lbl)
         return w
 
     # --------------------------------------------------------------- actions
+    IMPORT_RESULT = 2
+
+    def _choose_import(self):
+        path, _ = QFileDialog.getOpenFileName(self, "בחר קובץ הגדרות מקומי", "", "JSON (*.json)")
+        if path:
+            self.import_path = path
+            self.done(self.IMPORT_RESULT)  # the main window previews and applies it
+
     def _browse_key(self):
         path, _ = QFileDialog.getOpenFileName(self, "בחר מפתח SSH פרטי")
         if path:

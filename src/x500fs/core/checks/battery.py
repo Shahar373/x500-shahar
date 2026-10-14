@@ -22,14 +22,24 @@ def _batt(ctx, cfg):
 @check("batt.cells_config", "battery", "סוג סוללה ומספר תאים (בפרופיל)")
 def batt_cells_config(ctx, cfg):
     b = ctx.profile.battery or {}
-    chem, cells = b.get("chemistry"), b.get("cells")
+    chem, cells, cap = b.get("chemistry"), b.get("cells"), b.get("capacity_mah")
     src = "profile"
     observed = f"{ltr(chem or 'לא הוגדר')} · {ltr(cells or 'לא הוגדר')}S"
+    if cap:
+        observed += f" · {ltr(f'{cap} mAh')}"
+    ev = {"chemistry": chem, "cells": cells, "capacity_mah": cap}
+    fc_cap = ctx.param("BATT_CAPACITY")
+    note = ""
+    if fc_cap is not None:
+        ev["BATT_CAPACITY"] = fc_cap[0]
+        observed += f" · BATT_CAPACITY בבקר: {ltr(int(fc_cap[0]))}"
+        if cap and int(fc_cap[0]) != cap:
+            note = " BATT_CAPACITY בבקר שונה מהקיבולת שבפרופיל (מוצג לידיעה; האפליקציה לא משנה פרמטרים)."
     if not chem or not cells:
         return R(Status.UNKNOWN, "סוג הסוללה ו/או מספר התאים לא הוגדרו בפרופיל. האפליקציה לא מנחשת אותם.",
-                 observed=observed, expected="chemistry + cells מוגדרים", source=src, configured=False)
-    return R(Status.PASS, "סוג הסוללה ומספר התאים מוגדרים בפרופיל (לא נמדדים).", observed=observed,
-             expected="chemistry + cells מוגדרים", source=src,
+                 observed=observed, expected="chemistry + cells מוגדרים", source=src, configured=False, evidence=ev)
+    return R(Status.PASS, "סוג הסוללה ומספר התאים מוגדרים בפרופיל (לא נמדדים)." + note, observed=observed,
+             expected="chemistry + cells מוגדרים", source=src, evidence=ev,
              limitations="ערכים אלה נלקחים מהפרופיל בלבד. ודא שהם תואמים לסוללה המחוברת.")
 
 

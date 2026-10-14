@@ -8,6 +8,7 @@
   "battery": {
     "chemistry": null,
     "cells": null,
+    "capacity_mah": null,
     "preflight_min_cell_v": null,
     "rationale": "סוג הסוללה ומספר התאים חייבים להיות מוגדרים במפורש. האפליקציה לא מנחשת אותם."
   },
@@ -303,6 +304,10 @@
       "rationale": "מקשיב ה-SRT של ה-Pi נקשר לכתובת ה-Tailscale; Tailscale נדרש לווידאו ולנתיבי Tailscale/LTE."
     },
     "link.ground": {
+      "enabled": true,
+      "critical": false
+    },
+    "link.config_verify": {
       "enabled": true,
       "critical": false
     },

@@ -103,3 +103,37 @@ def test_video_refused_in_live_mode_without_telemetry(app, tmp_path, monkeypatch
     w._start_video()
     assert shown and not w.ctl.video_running()
     w.close()
+
+
+def test_import_local_config_from_ui(app, tmp_path, monkeypatch):
+    import json
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from x500fs import local_config
+
+    w = _window(tmp_path, simulation=False)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: (shown.append(a[2]), QMessageBox.Yes)[1])
+    p = tmp_path / "x500-local-config.json"
+    p.write_text(json.dumps({"schema": local_config.SCHEMA,
+                             "settings": {"connection": {"username": "pilot1"}, "pi": {"ground_ip": "100.99.1.2"}},
+                             "profiles": {"bench": {"battery": {"chemistry": "LiPo", "cells": 4,
+                                                                "capacity_mah": 5200}}}}), "utf-8")
+    w._import_local_config(str(p))
+    assert shown and "pilot1" in shown[0] and "Pi" in shown[0]
+    assert w.ctl.settings.connection.username == "pilot1"
+    assert w.ctl.profile.battery["capacity_mah"] == 5200
+    w.close()
+
+
+def test_example_local_config_is_importable(tmp_path):
+    from pathlib import Path
+
+    from x500fs import local_config
+    from x500fs.settings import SettingsStore
+
+    ex = Path(__file__).resolve().parents[1] / "docs" / "local-config.example.json"
+    store = SettingsStore(tmp_path / "cfg")
+    plan = local_config.plan(local_config.read(ex), store.load(), store.profiles_dir)
+    assert plan.changes and not plan.ignored

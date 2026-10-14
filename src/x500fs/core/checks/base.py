@@ -53,6 +53,9 @@ class DroneConfig:
     zte_gateway_configured: bool = False
     ground_ip_configured: bool = False
     evaluator: str = "desktop"         # desktop (the app) | pi_local (x500-preflight on the Pi)
+    zte_gateway: str = ""              # configured values, verified against what the Pi observes
+    ground_ip: str = ""
+    lte_interface: str = "eth1"
 
 
 # Checks that measure the desktop app's own link/view. On the Pi they cannot be

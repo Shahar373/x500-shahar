@@ -109,6 +109,7 @@ def drone_from_conf(conf: dict) -> DroneConfig:
         blackbox_sleep_s=float(conf["BLACKBOX_INTERVAL"] or 10), expected_fc_byid=conf["EXPECTED_FC_BYID"],
         ping_target_configured=bool(conf["PING_TARGET"]), zte_gateway_configured=bool(conf["ZTE_GATEWAY"]),
         ground_ip_configured=bool(conf["GROUND_IP"]), evaluator="pi_local",
+        zte_gateway=conf["ZTE_GATEWAY"], ground_ip=conf["GROUND_IP"], lte_interface=conf["LTE_IF"],
     )
 
 

@@ -239,6 +239,34 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(hp)))
 
+    def _import_local_config(self, path: str) -> None:
+        if self.ctl.connected:
+            QMessageBox.information(self, "ייבוא הגדרות", "יש להתנתק לפני ייבוא הגדרות.")
+            return
+        try:
+            plan = self.ctl.plan_local_config(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "ייבוא הגדרות", str(e))
+            return
+        if not plan.changes:
+            QMessageBox.information(self, "ייבוא הגדרות", "אין שינויים - ההגדרות כבר זהות לקובץ.")
+            return
+        text = "השינויים שייכנסו להגדרות המקומיות:\n\n" + "\n".join(f"\u2066{c}\u2069" for c in plan.changes[:40])
+        if plan.ignored:
+            text += "\n\nלא יובאו:\n" + "\n".join(f"\u2066{i}\u2069" for i in plan.ignored[:20])
+        text += "\n\nשום דבר לא נשלח ל-Pi או לבקר הטיסה. להחיל?"
+        if QMessageBox.question(self, "ייבוא הגדרות", text) != QMessageBox.Yes:
+            return
+        try:
+            self.ctl.apply_local_config(plan)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "ייבוא הגדרות", str(e))
+            return
+        self._fill_profiles()
+        self._apply_mode_chrome()
+        self.refresh()
+        self.statusBar().showMessage(f"יובאו {len(plan.changes)} הגדרות מהקובץ המקומי", 10000)
+
     def _export_diagnostics(self) -> None:
         if QMessageBox.question(
                 self, "ייצוא אבחון",
@@ -260,7 +288,11 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.ctl.settings, str(self.ctl.settings_store.dir),
                              str(self.ctl.settings_store.profiles_dir), self.ctl.forget_host_key, self)
-        if dlg.exec():
+        result = dlg.exec()
+        if result == SettingsDialog.IMPORT_RESULT:
+            self._import_local_config(dlg.import_path)
+            return
+        if result:
             was_connected = self.ctl.connected
             mode_changed = dlg.s.simulation != self.ctl.settings.simulation
             if was_connected and mode_changed:

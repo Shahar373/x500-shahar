@@ -35,6 +35,7 @@
 | `link.internet` | נתיב לאינטרנט ו-ICMP מה-Pi | לא קריטי | לא קריטי | x500-preflight הקיים מזהיר כשאין אינטרנט. אינטרנט אינו דרישה לבדיקת MAVLink. |
 | `link.tailscale` | Tailscale ב-Pi | לא קריטי | לא קריטי | מקשיב ה-SRT של ה-Pi נקשר לכתובת ה-Tailscale; Tailscale נדרש לווידאו ולנתיבי Tailscale/LTE. |
 | `link.ground` | הגעה מה-Pi לתחנת הקרקע (ICMP) | לא קריטי | לא קריטי |  |
+| `link.config_verify` | אימות הכתובות שהוגדרו (שער ZTE, תחנת קרקע) | לא קריטי | לא קריטי |  |
 | `link.mavlink_heartbeat` | HEARTBEAT מבקר הטיסה | **קריטי**<br>`max_age_s`=3.0 | **קריטי**<br>`max_age_s`=3.0 | ArduPilot שולח HEARTBEAT בקצב 1Hz. שלוש הודעות שלא הגיעו נחשבות לנתון ישן. |
 | `link.telemetry` | טלמטריה נדרשת | **קריטי**<br>`max_age_s`={"SYS_STATUS": 5, "GPS_RAW_INT": 5, "EKF_STATUS_REPORT": 5} | **קריטי**<br>`max_age_s`={"SYS_STATUS": 5, "GPS_RAW_INT": 5, "EKF_STATUS_REPORT": 5, "GLOBAL_POSITION_INT": 5} |  |
 | `link.gcs_peer` | תחנת קרקע (Mission Planner) בקישור | מושבת | לא קריטי | Mission Planner אחראי על השליטה בטיסה. אם לא נראה HEARTBEAT של תחנת קרקע בקישור הזה, ייתכן שהוא מחובר בנתיב אחר - לכן רק אזהרה. |

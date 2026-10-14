@@ -137,6 +137,7 @@ class Controller:
             ping_target_configured=bool(s.pi.ping_target),
             zte_gateway_configured=bool(s.pi.zte_gateway),
             ground_ip_configured=bool(s.pi.ground_ip),
+            zte_gateway=s.pi.zte_gateway, ground_ip=s.pi.ground_ip, lte_interface=s.pi.lte_interface,
         )
 
     # ------------------------------------------------------------------ connect
@@ -651,6 +652,25 @@ class Controller:
             return (f"{v.srt_profile}: {p['width']}x{p['height']}@{p['fps']} {p['bitrate_kbps']}kbps, "
                     f"SRT latency {p['latency_us'] // 1000}ms (requested, not measured)")
         return f"{v.width}x{v.height}@{v.fps}"
+
+    # ------------------------------------------------------------------ local config import
+    def plan_local_config(self, path) -> Any:
+        """Preview of importing a local settings file (nothing is written yet)."""
+        from . import local_config
+
+        return local_config.plan(local_config.read(path), self.settings, self.settings_store.profiles_dir)
+
+    def apply_local_config(self, plan) -> None:
+        """Explicit user action after reviewing the preview. Only allowed while disconnected."""
+        from . import local_config
+
+        if self.connected:
+            raise RuntimeError("יש להתנתק לפני ייבוא הגדרות")
+        local_config.apply(plan, self.settings_store)
+        self.settings = self.settings_store.load()
+        self.store = ObservationStore(simulated=self.settings.simulation)
+        self.load_profile()
+        self.session.event("info", "app", "הגדרות מקומיות יובאו מקובץ (" + str(len(plan.changes)) + " שינויים)")
 
     def export_diagnostics(self, directory: Path | None = None, journal_lines: int = 40) -> Path:
         """Explicit user action: read-only Pi diagnostics + collector + session log, redacted, saved locally."""

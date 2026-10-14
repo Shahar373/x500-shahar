@@ -1,0 +1,26 @@
+{
+  "schema": "x500fs.local-config/1",
+  "comment": "Example only. Copy to your computer (NOT into the repository), fill in, then: Settings -> General -> Import settings from a local file. No passwords: they are stored only in Windows Credential Manager.",
+  "settings": {
+    "profile_id": "bench",
+    "connection": {
+      "host": "x500pi",
+      "username": "<user on the Pi>",
+      "expected_hostname": "x500pi",
+      "link_path": "wifi"
+    },
+    "pi": {
+      "zte_gateway": "<ZTE modem gateway, e.g. from: ip route show dev eth1>",
+      "ground_ip": "<this laptop's Tailscale IPv4, from: tailscale ip -4>",
+      "legacy_python": "/home/<user>/<venv>/bin/python"
+    },
+    "video": {
+      "backend": "srt",
+      "srt_profile": "degraded"
+    }
+  },
+  "profiles": {
+    "bench": {"battery": {"chemistry": "LiPo", "cells": 4, "capacity_mah": 5000}},
+    "flight": {"battery": {"chemistry": "LiPo", "cells": 4, "capacity_mah": 5000}}
+  }
+}
