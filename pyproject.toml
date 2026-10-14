@@ -14,7 +14,7 @@ dependencies = [
     "pymavlink>=2.4.40",
     "paramiko>=3.4",
     "keyring>=24",
-    "av>=12",
+    "imageio-ffmpeg>=0.6",
 ]
 
 [project.optional-dependencies]
@@ -41,5 +41,5 @@ pythonpath = ["src"]
 addopts = "-ra"
 markers = [
     "gui: tests that create Qt widgets (run with QT_QPA_PLATFORM=offscreen)",
-    "video: tests that need PyAV encode/decode",
+    "video: tests that run FFmpeg (file decode, SRT end to end)",
 ]

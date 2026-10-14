@@ -50,7 +50,9 @@ def run_selftest(out_path: str | None, offscreen: bool = False) -> int:
     step("profiles", _profiles)
     step("pi_scripts", _pi_scripts)
     step("mavlink_mock_tcp", _mavlink)
-    step("video_decode", lambda: _video(tmp))
+    step("ffmpeg_srt_support", _ffmpeg_info)
+    step("video_decode_file", lambda: _video(tmp))
+    step("video_srt_end_to_end", _video_srt)
     step("gui_simulation_report", lambda: _gui(tmp))
     step("credential_backend", _credentials)
     report["ok"] = all(s["ok"] for s in report["steps"])
@@ -66,15 +68,27 @@ def run_selftest(out_path: str | None, offscreen: bool = False) -> int:
 
 
 def _imports():
-    import av
+    import imageio_ffmpeg
     import keyring  # noqa: F401
     import paramiko
     import PySide6
     from pymavlink.dialects.v20 import ardupilotmega  # noqa: F401
     from PySide6 import QtWidgets  # noqa: F401
 
-    return {"PySide6": PySide6.__version__, "paramiko": paramiko.__version__, "av": av.__version__,
-            "ffmpeg": str(getattr(av, "ffmpeg_version_info", "?"))}
+    return {"PySide6": PySide6.__version__, "paramiko": paramiko.__version__,
+            "imageio_ffmpeg": imageio_ffmpeg.__version__}
+
+
+def _ffmpeg_info():
+    from .video.ffmpeg_tools import find_ffmpeg, probe
+
+    exe = find_ffmpeg()
+    info = dict(probe(exe))
+    if not info["srt"]:
+        raise RuntimeError(f"bundled FFmpeg has no SRT input protocol: {info}")
+    info["path"] = exe
+    info["input_protocols"] = [p for p in info["input_protocols"] if p in ("srt", "rtsp", "tcp", "udp", "file")]
+    return info
 
 
 def _profiles():
@@ -129,32 +143,50 @@ def _mavlink():
 
 
 def _video(tmp: Path):
-    import av
+    import subprocess
 
-    from .video.worker import PyAvWorker
+    from .video.ffmpeg_tools import NO_WINDOW, find_ffmpeg
+    from .video.worker import FfmpegWorker, file_source
 
+    ff = find_ffmpeg()
     path = tmp / "selftest.mp4"
-    out = av.open(str(path), "w")
-    codec = "libx264" if "libx264" in av.codecs_available else "mpeg4"
-    s = out.add_stream(codec, rate=15)
-    s.width, s.height, s.pix_fmt = 160, 120, "yuv420p"
-    for i in range(30):
-        f = av.VideoFrame(160, 120, "rgb24")
-        f.planes[0].update(bytes([(i * 8) % 256, 90, 160]) * (160 * 120))
-        for pkt in s.encode(f):
-            out.mux(pkt)
-    for pkt in s.encode():
-        out.mux(pkt)
-    out.close()
-    w = PyAvWorker(lambda: str(path), max_reconnects=0)
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=160x120:rate=15", "-frames:v", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    str(path)], check=True, timeout=60, stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+    w = FfmpegWorker(lambda: file_source(path, realtime=False), width=160, height=120, max_reconnects=0)
     w.start()
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline and w.running():
         time.sleep(0.1)
     w.stop()
-    if w.frames < 20:
-        raise RuntimeError(f"decoded only {w.frames} frames")
-    return {"codec": codec, "frames": w.frames, "size": f"{w.width}x{w.height}"}
+    if w.frames != 30:
+        raise RuntimeError(f"decoded {w.frames}/30 frames: {w.error}")
+    return {"codec": w.codec, "frames": w.frames, "size": f"{w.width}x{w.height}"}
+
+
+def _video_srt():
+    """The app as SRT caller to a local listener that mimics x500-video-run (bundled FFmpeg on both sides)."""
+    if sys.platform.startswith("linux"):
+        # imageio-ffmpeg's Linux build is fully static and its resolver crashes on network
+        # inputs; the product targets Windows, where this step runs in CI.
+        return {"skipped": "linux static FFmpeg build cannot open network inputs"}
+    from .video.testsource import SrtTestSource
+    from .video.worker import FfmpegWorker, srt_source
+
+    with SrtTestSource(profile="degraded") as src:
+        w = FfmpegWorker(lambda: srt_source("127.0.0.1", src.port, 300000), width=480, height=360,
+                         max_reconnects=2)
+        w.start()
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline and w.frames < 30:
+            time.sleep(0.1)
+        st = w.status()
+        w.stop()
+    if st["frames"] < 30:
+        raise RuntimeError(f"SRT: decoded only {st['frames']} frames; state={st['state']} error={st['error']} "
+                           f"stderr={st.get('stderr_tail')}")
+    return {"frames": st["frames"], "fps": st["fps"], "codec": st["codec"], "source_size": st["source_size"],
+            "transport": st["transport"]}
 
 
 def _gui(tmp: Path):

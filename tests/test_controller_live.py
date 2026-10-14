@@ -8,6 +8,7 @@ evaluation and report export - with no Raspberry Pi or Pixhawk.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sys
 import time
@@ -20,6 +21,8 @@ from x500fs.controller import Controller, Listener
 from x500fs.core.status import Status
 from x500fs.settings import SettingsStore
 from x500fs.sim.mock_mavlink import MockAutopilot
+from x500fs.video.testsource import SrtTestSource, free_udp_port
+from videotools import network_ffmpeg
 
 PASSWORD = "s3cret-Passw0rd"
 
@@ -141,3 +144,90 @@ def test_camera_refused_without_heartbeat(tmp_path):
     ctl.connected = True  # pretend: connected but no telemetry
     gate = ctl.camera_gate()
     assert not gate.allowed and "HEARTBEAT" in gate.reason
+
+
+SUDO_RE = re.compile(r"sudo -n /usr/bin/systemctl (start|stop) x500-video@(high|normal|degraded)\.service")
+
+
+def _fake_video_service(sshd, port, ffmpeg, password_required=False):
+    state = {"active": None, "src": None}
+
+    def show(m):
+        on = state["active"] == m.group(1)
+        out = (f"ActiveState={'active' if on else 'inactive'}\nSubState={'running' if on else 'dead'}\n"
+               "MainPID=0\nNRestarts=0\n")
+        return 0, out.encode(), b""
+
+    def control(m):
+        if password_required:
+            return 1, b"", b"sudo: a password is required\n"
+        action, prof = m.group(1), m.group(2)
+        if action == "start":
+            state["active"] = prof
+            state["src"] = SrtTestSource(port, prof, ffmpeg_path=ffmpeg).start()
+        else:
+            if state["src"]:
+                state["src"].stop()
+            state["active"] = None
+        return 0, b"", b""
+
+    sshd.handlers += [(re.compile(r"/usr/bin/systemctl show x500-video@(high|normal|degraded)\.service .*"), show),
+                      (SUDO_RE, control)]
+    return state
+
+
+def _connect(ctl, rec):
+    ctl.connect()
+    assert wait(lambda: rec.hostkeys)
+    ctl.trust_pending_host_key()
+    assert wait(lambda: ctl.store.get("mav.msg.HEARTBEAT") is not None)
+    assert wait(lambda: ctl.camera_gate().allowed, 10)
+
+
+def _srt_settings(ctl, port, ffmpeg):
+    v = ctl.settings.video
+    v.backend, v.srt_profile, v.srt_host, v.srt_port, v.ffmpeg_path = "srt", "degraded", "127.0.0.1", port, ffmpeg
+    v.service_start_wait_s = 3.0
+
+
+@pytest.mark.video
+def test_live_srt_video_starts_pi_service_and_decodes(live):
+    ctl, rec, sshd, ap = live
+    ff = network_ffmpeg()
+    port = free_udp_port()
+    state = _fake_video_service(sshd, port, ff)
+    _srt_settings(ctl, port, ff)
+    _connect(ctl, rec)
+    try:
+        assert ctl.start_video().allowed
+        assert wait(lambda: ctl.video_worker() is not None and ctl.video_worker().frames >= 10, 30), \
+            (ctl.video_worker().status() if ctl.video_worker() else None, rec.notices)
+        st = ctl.video_worker().status()
+        assert st["transport"] == "srt" and st["source_size"] == "480x360"
+        assert "sudo -n /usr/bin/systemctl start x500-video@degraded.service" in sshd.commands
+        ctl.stop_video()
+        assert wait(lambda: "sudo -n /usr/bin/systemctl stop x500-video@degraded.service" in sshd.commands, 10)
+        # every privileged command was one of the six allowlisted ones
+        assert all(SUDO_RE.fullmatch(c) for c in sshd.commands if "sudo" in c)
+        # armed: neither start nor a service change is allowed
+        ap.armed = True
+        assert wait(lambda: ctl.camera_gate().allowed is False, 5)
+        assert ctl.start_video().allowed is False
+    finally:
+        if state["src"]:
+            state["src"].stop()
+
+
+@pytest.mark.video
+def test_live_srt_password_required_is_explained_not_bypassed(live):
+    ctl, rec, sshd, ap = live
+    ff = network_ffmpeg()
+    port = free_udp_port()
+    _fake_video_service(sshd, port, ff, password_required=True)
+    _srt_settings(ctl, port, ff)
+    _connect(ctl, rec)
+    assert ctl.start_video().allowed
+    assert wait(lambda: ctl.video_worker() is None, 10)
+    assert any("x500-video degraded" in t for _, t in rec.notices), rec.notices
+    assert ctl.store.get("video.state").value["state"] == "failed"
+    assert [c for c in sshd.commands if "sudo" in c] == ["sudo -n /usr/bin/systemctl start x500-video@degraded.service"]

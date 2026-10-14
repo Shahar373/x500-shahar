@@ -6,7 +6,17 @@ import time
 
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+
+from ..video.pipeline import BAD, OK, UNKNOWN, WARN, pipeline_summary
+
+LEVEL_COLOR = {OK: "#1b7f3b", WARN: "#b26a00", BAD: "#c62828", UNKNOWN: "#6b7280"}
+PIPELINE_ROWS = [
+    ("service", "שירות ב-Pi"),
+    ("encoder", "מקודד ב-Pi"),
+    ("transport", "חיבור לזרם"),
+    ("decoded", "תמונה במחשב"),
+]
 
 STATE_HE = {
     "stopped": "כבוי",
@@ -116,19 +126,39 @@ class VideoPanel(QWidget):
         for w in (self.btn, self.state_lbl, self.fps_lbl, self.res_lbl, self.lat_lbl, self.rec_lbl):
             info.addWidget(w)
         info.addStretch(1)
-        self.note = QLabel("הפעלה או שינוי הגדרות מצלמה מותרים רק כשהרחפן אינו חמוש. "
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.pipe_lbls: dict[str, QLabel] = {}
+        for row, (key, title) in enumerate(PIPELINE_ROWS):
+            t = QLabel(title)
+            t.setStyleSheet("color:#5f6b7a")
+            v = QLabel("—")
+            v.setWordWrap(True)
+            v.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(t, row, 0)
+            grid.addWidget(v, row, 1)
+            self.pipe_lbls[key] = v
+        self.note = QLabel("הפעלה, עצירה או החלפת פרופיל מותרות רק כשהרחפן אינו חמוש. רק השורה 'תמונה במחשב' "
+                           "מעידה על תמונה חיה; 'מקודד ב-Pi' מעיד רק שה-Pi מייצר וידאו. "
                            "תקלה בווידאו היא אזהרה נפרדת, אלא אם הפרופיל דורש וידאו.")
         self.note.setObjectName("disclaimer")
         self.note.setWordWrap(True)
         lay = QVBoxLayout(self)
         lay.addLayout(info)
         lay.addWidget(self.frame, 1)
+        lay.addLayout(grid)
         lay.addWidget(self.note)
         self._running = False
         self._status: dict = {}
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(250)
+
+    def update_pipeline(self, snap, worker_status: dict | None, simulated: bool = False) -> None:
+        for key, (text, level) in pipeline_summary(snap, worker_status, simulated).items():
+            lbl = self.pipe_lbls[key]
+            lbl.setText(text)
+            lbl.setStyleSheet(f"color:{LEVEL_COLOR.get(level, '#1d2330')};font-weight:600")
 
     def _toggle(self) -> None:
         (self.stop_requested if self._running else self.start_requested).emit()

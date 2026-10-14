@@ -33,7 +33,8 @@ from .transport.mavlink_client import MavConfig, MavlinkClient
 from .transport.pi_link import PiPoller, SshManager
 from .transport.ssh import HostKeyUnknown, KnownHosts, LocalForwarder, SshAuth, SshError
 from .transport.streams import SshChannelStream, TcpStream, UdpListenStream
-from .video.worker import PyAvWorker, SimVideoWorker
+from .transport.pi_video import PiVideoControl, password_help
+from .video.worker import FfmpegWorker, SimVideoWorker, rtsp_source, srt_source
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,8 @@ class Controller:
         self._lock = threading.Lock()
         self.preflight_started: float | None = None
         self.camera_info: dict | None = None
+        self._video_service_started: str | None = None  # profile this app started on the Pi
+        self.video_service_log: list[dict] = []
         self.video_perf: list[dict] = []
         self._perf_last_t: float | None = None
 
@@ -319,7 +322,7 @@ class Controller:
         v = self.settings.video
         self.video_perf.append({
             "t": time.strftime("%H:%M:%S"),
-            "requested": f"{v.width}x{v.height}@{v.fps}",
+            "requested": self._video_profile_text(),
             "decoded": f"{st.get('width')}x{st.get('height')}",
             "fps_measured": st.get("fps"),
             "pi_cpu_total_pct": cpu.get("usage_pct"),
@@ -389,6 +392,7 @@ class Controller:
         return self._video is not None
 
     def start_video(self) -> CameraGate:
+        """Explicit user action. Requires a fresh, verified disarmed state."""
         gate = self.camera_gate()
         if not gate.allowed or self._video is not None:
             return gate
@@ -396,21 +400,145 @@ class Controller:
         common = dict(on_status=self._on_video_status, on_frame=self.listener.on_video_frame,
                       stale_after_s=v.stale_after_s)
         if self.simulation:
-            self._video = SimVideoWorker(v.width, v.height, v.fps, **common)
+            if v.backend == "srt":
+                prof = v.profile()
+                self._video = SimVideoWorker(prof["width"], prof["height"], prof["fps"], **common)
+                if self._sim:
+                    self._sim.video_profile = v.srt_profile
+            else:
+                self._video = SimVideoWorker(v.width, v.height, v.fps, **common)
             self._video.start()
             return gate
-        self._video = PyAvWorker(self._video_url, rtsp_transport="tcp" if v.transport == "ssh_tunnel" else v.rtsp_transport,
-                                 open_timeout_s=v.open_timeout_s, max_reconnects=v.max_reconnects,
-                                 on_link=self._on_video_link, **common)
-        worker = self._video
+        if v.backend == "srt":
+            prof = v.profile()
+            worker = FfmpegWorker(self._srt_source, width=prof["width"], height=prof["height"],
+                                  ffmpeg_path=v.ffmpeg_path, open_timeout_s=v.open_timeout_s,
+                                  max_reconnects=v.max_reconnects, on_link=self._on_video_link, **common)
+            self._video = worker
 
-        def _prepare_and_start():
+            def _prepare_and_start():
+                if v.manage_pi_service and not self._ensure_pi_video_service(v.srt_profile):
+                    if self._video is worker:
+                        self._video = None
+                        self._on_video_status({**worker.status(), "state": "failed",
+                                               "error": "שירות הווידאו ב-Pi לא הופעל"})
+                    return
+                if self._video is worker:
+                    worker.start()
+            threading.Thread(target=_prepare_and_start, name="video-start", daemon=True).start()
+            return gate
+        worker = FfmpegWorker(self._rtsp_source, width=v.width, height=v.height, ffmpeg_path=v.ffmpeg_path,
+                              open_timeout_s=v.open_timeout_s, max_reconnects=v.max_reconnects,
+                              on_link=self._on_video_link, **common)
+        self._video = worker
+
+        def _prepare_and_start_rtsp():
             if v.apply_camera_settings:
                 self._configure_camera()
             if self._video is worker:
                 worker.start()
-        threading.Thread(target=_prepare_and_start, name="video-start", daemon=True).start()
+        threading.Thread(target=_prepare_and_start_rtsp, name="video-start", daemon=True).start()
         return gate
+
+    # -- SRT (existing Pi pipeline) -------------------------------------
+    def pi_tailscale_ipv4(self) -> str | None:
+        col = self.store.get("pi.collector")
+        if col is None or not isinstance(col.value, dict):
+            return None
+        secs = col.value.get("sections") or {}
+        ts = (((secs.get("net_probes") or {}).get("data") or {}).get("tailscale") or {})
+        if ts.get("ipv4"):
+            return ts["ipv4"]
+        ips = ((((secs.get("network") or {}).get("data") or {}).get("tailscale") or {}).get("self_ips") or [])
+        return next((ip for ip in ips if isinstance(ip, str) and ip.count(".") == 3), None)
+
+    def _srt_source(self):
+        v = self.settings.video
+        host = v.srt_host.strip() or self.pi_tailscale_ipv4()
+        if not host:
+            raise RuntimeError("כתובת ה-Tailscale של ה-Pi לא ידועה עדיין (ממתין לנתוני ה-Pi) ולא הוגדרה כתובת SRT")
+        return srt_source(host, v.srt_port, v.profile()["latency_us"], extra=v.srt_extra_params)
+
+    def _video_log(self, action: str, profile: str, ok: bool, message: str = "") -> None:
+        self.video_service_log.append({"t_wall": time.time(), "action": action, "profile": profile, "ok": ok,
+                                       "message": message[:300]})
+        del self.video_service_log[:-50]
+
+    def _ensure_pi_video_service(self, profile: str) -> bool:
+        """Start x500-video@<profile> if needed (allowlisted sudo -n systemctl). True when it runs."""
+        try:
+            ssh = self._ssh.wait_session(5.0) if self._ssh else None
+            if ssh is None:
+                raise SshError("SSH not connected")
+            ctl = PiVideoControl(ssh, self.settings.video.unit_template)
+            states = ctl.states()
+        except Exception as e:  # noqa: BLE001
+            msg = f"לא ניתן לקרוא את מצב שירות הווידאו ב-Pi: {type(e).__name__}: {e}"
+            self.listener.on_notice("warning", msg)
+            self._video_log("state", profile, False, msg)
+            return False
+        if ctl.is_running(states.get(profile, {})):
+            self._video_log("state", profile, True, "already running")
+            return True
+        gate = self.camera_gate()  # re-check right before changing anything on the Pi
+        if not gate.allowed:
+            self.listener.on_notice("warning", gate.reason)
+            return False
+        for other, st in states.items():
+            if other != profile and ctl.is_running(st):
+                res = ctl.stop(other)
+                self._video_log("stop", other, res.ok, res.message)
+                if not res.ok:
+                    self.listener.on_notice("warning", password_help(profile) if res.needs_password else
+                                            f"פרופיל וידאו אחר ({other}) פועל ב-Pi ולא נעצר: {res.message}")
+                    return False
+                self.session.event("info", "video", f"שירות הווידאו {other} נעצר ב-Pi (החלפת פרופיל)")
+        res = ctl.start(profile)
+        self._video_log("start", profile, res.ok, res.message)
+        if not res.ok:
+            self.listener.on_notice("warning", password_help(profile) if res.needs_password else
+                                    f"הפעלת שירות הווידאו ב-Pi נכשלה: {res.message}")
+            self.session.event("warning", "video", f"הפעלת x500-video@{profile} נכשלה: {res.message}")
+            return False
+        self._video_service_started = profile
+        self.session.event("info", "video", f"שירות הווידאו x500-video@{profile} הופעל ב-Pi (פעולה מפורשת)")
+        deadline = time.monotonic() + max(1.0, self.settings.video.service_start_wait_s)
+        while time.monotonic() < deadline:
+            try:
+                if ctl.is_running(ctl.state(profile)):
+                    time.sleep(0.8)  # the listener binds right after the unit becomes active
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.4)
+        self.listener.on_notice("warning", f"x500-video@{profile} לא הגיע למצב פעיל. בדוק את יומן השירות ב-Pi.")
+        return False
+
+    def _stop_pi_video_service(self, profile: str) -> None:
+        gate = self.camera_gate()
+        if not gate.allowed:
+            self.listener.on_notice("warning", "הצפייה נעצרה במחשב, אבל שירות הווידאו ב-Pi נשאר פועל: " + gate.reason)
+            self._video_log("stop", profile, False, "not stopped: " + gate.reason)
+            return
+        try:
+            ssh = self._ssh.wait_session(5.0) if self._ssh else None
+            if ssh is None:
+                raise SshError("SSH not connected")
+            res = PiVideoControl(ssh, self.settings.video.unit_template).stop(profile)
+        except Exception as e:  # noqa: BLE001
+            self.listener.on_notice("warning", f"עצירת שירות הווידאו ב-Pi נכשלה: {type(e).__name__}: {e}")
+            return
+        self._video_log("stop", profile, res.ok, res.message)
+        if res.ok:
+            self.session.event("info", "video", f"שירות הווידאו x500-video@{profile} נעצר ב-Pi")
+        else:
+            self.listener.on_notice("warning", password_help(profile) if res.needs_password else
+                                    f"עצירת שירות הווידאו ב-Pi נכשלה: {res.message}")
+
+    # -- RTSP / MediaMTX alternative -------------------------------------
+    def _rtsp_source(self):
+        v = self.settings.video
+        return rtsp_source(self._video_url(), "tcp" if v.transport == "ssh_tunnel" else v.rtsp_transport)
 
     def _video_url(self) -> str:
         v = self.settings.video
@@ -478,7 +606,16 @@ class Controller:
         except Exception:  # noqa: BLE001
             pass
         self.session.link_up("video")  # an explicit stop is not an interruption
-        threading.Thread(target=w.stop, name="video-stop", daemon=True).start()
+        started, self._video_service_started = self._video_service_started, None
+        v = self.settings.video
+        if self._sim:
+            self._sim.video_profile = None
+
+        def _stop():
+            w.stop()
+            if started and not self.simulation and v.manage_pi_service and v.stop_pi_service_on_stop:
+                self._stop_pi_video_service(started)
+        threading.Thread(target=_stop, name="video-stop", daemon=True).start()
         fw = self._forwarder
         self._forwarder = None
         if fw:
@@ -501,9 +638,19 @@ class Controller:
             "mavlink_endpoint": self._mav_endpoint_text() if not self.simulation else "SIM",
             "mavlink_requests_enabled": s.mavlink.request_messages,
             "app_sysid": s.mavlink.source_sysid,
-            "video_transport": s.video.transport,
-            "video_profile": f"{s.video.width}x{s.video.height}@{s.video.fps}",
+            "video_backend": s.video.backend,
+            "video_transport": "srt (caller)" if s.video.backend == "srt" else f"rtsp ({s.video.transport})",
+            "video_profile": self._video_profile_text(),
+            "video_manage_pi_service": s.video.manage_pi_service,
         }
+
+    def _video_profile_text(self) -> str:
+        v = self.settings.video
+        if v.backend == "srt":
+            p = v.profile()
+            return (f"{v.srt_profile}: {p['width']}x{p['height']}@{p['fps']} {p['bitrate_kbps']}kbps, "
+                    f"SRT latency {p['latency_us'] // 1000}ms (requested, not measured)")
+        return f"{v.width}x{v.height}@{v.fps}"
 
     def export_report(self, directory: Path | None = None) -> tuple[Path, Path]:
         results, overall, snap = self.evaluate()
@@ -515,8 +662,11 @@ class Controller:
                 val = credentials.get(ident)
                 if val:
                     secrets.append(val)
+        from .video.ffmpeg_tools import describe as ffmpeg_describe
         video = {"current": self._video.status() if self._video else None,
                  "camera_settings_applied": self.camera_info,
+                 "pi_service_actions": list(self.video_service_log),
+                 "decoder": ffmpeg_describe(self.settings.video.ffmpeg_path) if not self.simulation else "SIM",
                  "performance": self.video_perf_summary()}
         doc = build_report(
             snap=snap, results=results, overall=overall, profile_summary=self.profile.summary(),

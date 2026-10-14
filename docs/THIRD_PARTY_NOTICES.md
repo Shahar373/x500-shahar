@@ -13,14 +13,16 @@ This list is informational and is not legal advice.
 | paramiko | SSH | LGPL-2.1 |
 | cryptography, bcrypt, PyNaCl, cffi, pycparser, invoke | paramiko dependencies | Apache-2.0 / BSD |
 | keyring, jaraco.*, more-itertools, pywin32-ctypes | Windows Credential Manager access | MIT / BSD-3-Clause |
-| PyAV (`av`) | video decoding | BSD-3-Clause |
-| FFmpeg 9.x libraries (shipped inside the PyAV wheel, `av.libs`) | RTSP + H.264 decoding | FFmpeg itself reports "LGPL version 3 or later"; **the PyAV wheel build also enables libx264/libx265 (GPL-2.0-or-later)**. Treat the bundled FFmpeg as GPL for redistribution purposes. |
+| imageio-ffmpeg 0.6.0 | locates the bundled FFmpeg executable | BSD-2-Clause |
+| FFmpeg 7.1 "essentials" build by gyan.dev (`ffmpeg-win-x86_64-v7.1.exe`, shipped inside the imageio-ffmpeg wheel) | SRT caller + MPEG-TS/H.264 decoding (and RTSP for the MediaMTX alternative), run as a separate process | Configured with `--enable-gpl --enable-version3` (libx264, libx265, libsrt, …): **GPL-3.0-or-later**. Source: https://ffmpeg.org and https://www.gyan.dev/ffmpeg/builds/ |
 
 ## Notes
 
-* The app only **decodes** video. The x264/x265 encoders are present in the
-  PyAV wheel but are not used at runtime (except by the self-test, which encodes
-  a tiny local clip to verify decoding).
+* FFmpeg runs as a **separate executable** (subprocess); it is not linked into the
+  app. The app only **decodes** video at runtime. The self-test also uses FFmpeg
+  to encode a tiny local clip and a local SRT test stream to verify decoding.
+* PyAV is no longer used: its wheels are built without libsrt, so they cannot
+  open the Pi's existing SRT stream.
 * If you redistribute the installer to others, comply with the GPL/LGPL terms of
   the components above (provide license texts and the corresponding source or a
   written offer). For personal use on your own laptop no action is required.

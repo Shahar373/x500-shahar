@@ -28,6 +28,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 
+      - name: Bundled FFmpeg supports SRT (fail the build otherwise)
+        shell: pwsh
+        run: |
+          $ff = (python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())").Trim()
+          & $ff -hide_banner -version | Select-Object -First 1
+          $prot = & $ff -hide_banner -protocols 2>&1 | Out-String
+          if ($prot -notmatch "(?m)^\s*srt\s*$") { throw "bundled FFmpeg has no SRT protocol" }
+          Write-Host "SRT protocol present"
+
       - name: Unit and integration tests
         run: python -m pytest -q
 
@@ -94,6 +103,9 @@ jobs:
           Get-Content selftest-installed.json
           $json = Get-Content selftest-installed.json -Raw | ConvertFrom-Json
           if ($proc.ExitCode -ne 0 -or -not $json.ok -or -not $json.frozen) { throw "installed self-test failed" }
+          $srt = ($json.steps | Where-Object { $_.name -eq "video_srt_end_to_end" }).detail
+          if (-not $srt -or $srt.skipped -or $srt.frames -lt 30) { throw "SRT end-to-end decode was not verified: $($srt | ConvertTo-Json -Compress)" }
+          Write-Host "SRT end-to-end: $($srt.frames) frames, $($srt.source_size), $($srt.codec)"
           if (Get-Command python -ErrorAction SilentlyContinue) { Write-Host "note: python exists on the runner but was removed from the child PATH" }
           $shot = ($json.steps | Where-Object { $_.name -eq "gui_simulation_report" }).detail.screenshot
           if ($shot -and (Test-Path $shot)) { Copy-Item $shot "$PWD\selftest-window.png" }

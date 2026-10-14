@@ -16,7 +16,7 @@ def video_stream(ctx, cfg):
     bad = Status.FAIL if required else Status.WARN
     o = ctx.snap.get("video.state")
     v = o.value if o and isinstance(o.value, dict) else {}
-    src = ctx.src(f"וידאו · {v.get('backend', 'PyAV/FFmpeg')} · {v.get('url_redacted', 'RTSP')}")
+    src = ctx.src(f"וידאו · {v.get('backend', 'FFmpeg')} · {v.get('url_redacted', '')}")
     state = v.get("state", "stopped")
     if state in ("stopped", None):
         if required:

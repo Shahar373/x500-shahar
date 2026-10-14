@@ -339,6 +339,7 @@ class MainWindow(QMainWindow):
         # panels
         video = ctl.video_worker().status() if ctl.video_worker() else None
         self.telemetry.update_snapshot(snap, ctl.session.rtt.summary(), video)
+        self.video.update_pipeline(snap, video, ctl.simulation)
         if self._events_session is not ctl.session:
             self._events_session = ctl.session
             self._seen_events = 0

@@ -14,10 +14,14 @@ datas = collect_data_files("x500fs", includes=["profiles/*.json", "assets/*"])
 # The Pi-side scripts are streamed to the Pi as source, so they must ship as files.
 datas += collect_data_files("x500fs", include_py_files=True, includes=["pi_side/x500fs_*.py"])
 datas += [(os.path.join(ROOT, "docs", "THIRD_PARTY_NOTICES.md"), ".")]
+# FFmpeg executable (gyan.dev 7.1 essentials on Windows, built with --enable-libsrt) from the
+# hash-pinned imageio-ffmpeg wheel. The pyinstaller-hooks-contrib hook does the same; explicit here.
+datas += collect_data_files("imageio_ffmpeg", subdir="binaries")
 
 hiddenimports = collect_submodules("x500fs") + [
     "pymavlink.dialects.v20.ardupilotmega",
     "keyring.backends.Windows",
+    "imageio_ffmpeg.binaries",
 ]
 
 a = Analysis(

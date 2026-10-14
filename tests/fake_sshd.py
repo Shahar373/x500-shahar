@@ -61,6 +61,8 @@ class FakeSshd:
         self.env = env or {}
         self.forward_requests: list = []
         self.commands: list[str] = []
+        # (compiled regex, fn(match) -> (exit_code, stdout_bytes, stderr_bytes)) answered without a shell
+        self.handlers: list = []
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -115,6 +117,25 @@ class FakeSshd:
 
     def _run_exec(self, channel: paramiko.Channel, command: str):
         self.commands.append(command)
+        for rx, fn in self.handlers:
+            m = rx.fullmatch(command)
+            if m:
+                # wait for the client's stdin EOF first (as the shell path does), so the
+                # exec request is fully acknowledged before the channel closes
+                while not channel.eof_received and not channel.closed:
+                    if channel.recv_ready():
+                        channel.recv(65536)
+                    else:
+                        select.select([channel], [], [], 0.05)
+                code, out, err = fn(m)
+                try:
+                    channel.sendall(out)
+                    channel.sendall_stderr(err)
+                    channel.send_exit_status(code)
+                    channel.close()
+                except (OSError, EOFError):
+                    pass
+                return
         env = dict(__import__("os").environ)
         env.update(self.env)
         env["SSH_CONNECTION"] = "127.0.0.1 50000 127.0.0.1 22"
