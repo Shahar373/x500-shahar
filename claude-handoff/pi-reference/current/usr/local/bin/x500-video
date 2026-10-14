@@ -1,0 +1,138 @@
+#!/bin/bash
+set -e
+
+profiles="high normal degraded"
+
+active_profile() {
+    for p in $profiles; do
+        state=$(systemctl show "x500-video@$p.service" \
+            -p ActiveState --value 2>/dev/null)
+
+        if [ "$state" = "active" ] || [ "$state" = "activating" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+case "${1:-status}" in
+
+    high|normal|degraded)
+
+        if current=$(active_profile); then
+            echo "Video already running with profile: $current"
+            echo "Run: x500-video stop"
+            exit 1
+        fi
+
+        echo "Starting X500 video: $1"
+        sudo systemctl start "x500-video@$1.service"
+
+        sleep 1
+
+        state=$(systemctl show "x500-video@$1.service" \
+            -p ActiveState --value)
+
+        if [ "$state" = "active" ] || [ "$state" = "activating" ]; then
+            echo "Running."
+        else
+            echo "Failed to start."
+            sudo journalctl \
+                -u "x500-video@$1.service" \
+                -n 20 \
+                --no-pager
+            exit 1
+        fi
+        ;;
+
+    stop)
+
+        for p in $profiles; do
+            sudo systemctl stop "x500-video@$p.service" \
+                2>/dev/null || true
+        done
+
+        echo "X500 video stopped."
+        ;;
+
+    status)
+
+        found=0
+
+        for p in $profiles; do
+
+            state=$(systemctl show "x500-video@$p.service" \
+                -p ActiveState --value 2>/dev/null)
+
+            substate=$(systemctl show "x500-video@$p.service" \
+                -p SubState --value 2>/dev/null)
+
+            if [ "$state" != "inactive" ] && \
+               [ "$state" != "failed" ]; then
+
+                pid=$(systemctl show "x500-video@$p.service" \
+                    -p MainPID --value 2>/dev/null)
+
+                echo "X500 video: $state"
+                echo "Profile:    $p"
+                echo "SubState:   $substate"
+                echo "MainPID:    $pid"
+
+                progress="/run/x500-video-${p}.progress"
+
+                if [ -f "$progress" ]; then
+                    now=$(date +%s)
+                    updated=$(stat -c %Y "$progress" 2>/dev/null || echo 0)
+                    age=$((now - updated))
+
+                    if [ "$age" -le 3 ]; then
+                        echo "SRT:        CONNECTED"
+                    else
+                        echo "SRT:        WAITING / RECONNECTING"
+                    fi
+                else
+                    echo "SRT:        WAITING FOR GROUND STATION"
+                fi
+
+                found=1
+                break
+            fi
+
+        done
+
+        if [ "$found" -eq 0 ]; then
+            echo "X500 video: STOPPED"
+        fi
+        ;;
+
+    logs)
+
+        if current=$(active_profile); then
+            journalctl \
+                -u "x500-video@$current.service" \
+                -f
+        else
+            echo "No active video stream."
+            echo "Recent logs:"
+            journalctl \
+                -u 'x500-video@*' \
+                -n 30 \
+                --no-pager
+        fi
+        ;;
+
+    *)
+
+        echo "Usage:"
+        echo "  x500-video high"
+        echo "  x500-video normal"
+        echo "  x500-video degraded"
+        echo "  x500-video stop"
+        echo "  x500-video status"
+        echo "  x500-video logs"
+        exit 2
+        ;;
+
+esac

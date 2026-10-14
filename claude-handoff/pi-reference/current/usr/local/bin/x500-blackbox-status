@@ -1,0 +1,68 @@
+#!/bin/bash
+
+LOGDIR="/var/log/x500/blackbox"
+FILE="$LOGDIR/x500-blackbox-$(date +%Y%m%d).csv"
+
+echo "============================"
+echo " X500 Black Box Status"
+echo "============================"
+echo
+
+SERVICE=$(systemctl is-active x500-blackbox 2>/dev/null)
+echo "Service:       $SERVICE"
+
+if [ ! -f "$FILE" ]; then
+    echo "Current file:  none"
+    echo
+    echo "============================"
+    exit 0
+fi
+
+SIZE=$(du -h "$FILE" | awk '{print $1}')
+LINES=$(wc -l < "$FILE")
+SAMPLES=$((LINES - 1))
+
+[ "$SAMPLES" -lt 0 ] && SAMPLES=0
+
+LAST=$(tail -1 "$FILE")
+LAST_TIME=$(echo "$LAST" | cut -d, -f1)
+
+MTIME=$(stat -c %Y "$FILE")
+NOW=$(date +%s)
+AGE=$((NOW - MTIME))
+
+echo "Current file:  $FILE"
+echo "Size:          $SIZE"
+echo "Samples:       $SAMPLES"
+echo "Last sample:   $LAST_TIME"
+echo "Sample age:    ${AGE}s"
+
+if [ "$AGE" -le 20 ]; then
+    echo "Logging:       HEALTHY"
+else
+    echo "Logging:       STALE"
+fi
+
+echo
+echo "Latest values:"
+echo "$LAST" | awk -F, '
+{
+    printf "  Temperature: %.1f C\n", $2
+    printf "  Throttled:   %s\n", $3
+    printf "  RAM:         %s%%\n", $4
+    printf "  Disk:        %s%%\n", $5
+    printf "  Load:        %s\n", $6
+    printf "  Uplink:      %s\n", $7
+    printf "  Wi-Fi:       %s\n", $8
+    printf "  LTE:         %s\n", $9
+    printf "  Tailscale:   %s\n", $10
+    printf "  Ground:      %s\n", $11
+    printf "  Video:       %s / %s\n", $12, $13
+    printf "  MAVLink:     %s\n", $14
+}'
+
+echo
+echo "Retention:     14 days"
+echo "Interval:      10 seconds"
+echo
+echo "============================"

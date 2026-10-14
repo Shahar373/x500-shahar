@@ -1,0 +1,476 @@
+#!/bin/bash
+
+echo "================================"
+echo " X500 Companion Computer Status"
+echo "================================"
+echo
+
+echo "[SYSTEM]"
+echo "Hostname:      $(hostname)"
+echo "Uptime:        $(uptime -p)"
+echo "Kernel:        $(uname -r)"
+echo "Temperature:   $(vcgencmd measure_temp 2>/dev/null || echo unavailable)"
+echo "Throttling:    $(vcgencmd get_throttled 2>/dev/null || echo unavailable)"
+echo
+
+echo "[HEALTH]"
+HEALTH_KEY=$(/usr/local/bin/x500-health --key 2>/dev/null)
+HEALTH_STATE=$(echo "$HEALTH_KEY" | sed -n 's/.*state=\([^ ]*\).*/\1/p')
+
+echo "Overall:       ${HEALTH_STATE:-UNKNOWN}"
+echo "Monitor:       $(systemctl is-active x500-health-monitor 2>/dev/null)"
+
+TEMP_H=$(echo "$HEALTH_KEY" | sed -n 's/.*temp=\([^ ]*\).*/\1/p')
+POWER_H=$(echo "$HEALTH_KEY" | sed -n 's/.*power=\([^ ]*\).*/\1/p')
+RAM_H=$(echo "$HEALTH_KEY" | sed -n 's/.*ram=\([^ ]*\).*/\1/p')
+DISK_H=$(echo "$HEALTH_KEY" | sed -n 's/.*disk=\([^ ]*\).*/\1/p')
+
+echo "Temperature:   ${TEMP_H:-unknown}"
+echo "Power:         ${POWER_H:-unknown}"
+echo "RAM:           ${RAM_H:-unknown}"
+echo "Storage:       ${DISK_H:-unknown}"
+echo
+
+echo "[MEMORY]"
+free -h | awk '/Mem:/ {print "RAM:           used "$3" / "$2}'
+echo
+
+echo "[STORAGE]"
+df -h / | awk 'NR==2 {print "Root FS:       used "$3" / "$2" ("$5")"}'
+echo
+
+echo "[NETWORK]"
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status
+echo
+echo "Default routes:"
+ip route show default
+echo
+
+ACTIVE_ROUTE=$(ip route get 1.1.1.1 2>/dev/null | head -1)
+
+if echo "$ACTIVE_ROUTE" | grep -q "dev wlan0"; then
+    echo "Active uplink: Wi-Fi (wlan0)"
+elif echo "$ACTIVE_ROUTE" | grep -q "dev eth1"; then
+    echo "Active uplink: LTE/ZTE (eth1)"
+else
+    echo "Active uplink: UNKNOWN"
+fi
+
+echo "Net monitor:   $(systemctl is-active x500-net-monitor 2>/dev/null)"
+echo
+
+if ping -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+    echo "Internet:      OK"
+else
+    echo "Internet:      FAIL"
+fi
+
+echo
+echo "[TAILSCALE]"
+echo "Service:       $(systemctl is-active tailscaled 2>/dev/null)"
+TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "IPv4:          ${TSIP:-unavailable}"
+echo
+
+echo "[ZTE LTE]"
+if ip link show eth1 >/dev/null 2>&1; then
+    echo "Interface:     eth1 present"
+    ip -br addr show eth1
+else
+    echo "Interface:     not present"
+fi
+echo
+
+echo "[CAMERA]"
+if rpicam-hello --list-cameras 2>/dev/null | grep -qi imx219; then
+    echo "IMX219:        detected"
+else
+    echo "IMX219:        NOT detected"
+fi
+echo
+
+echo "[WATCHDOG]"
+systemctl show \
+    -p RuntimeWatchdogUSec \
+    -p RebootWatchdogUSec 2>/dev/null
+
+echo
+echo "[VIDEO]"
+VIDEO_FOUND=0
+
+for PROFILE in high normal degraded; do
+    STATE=$(systemctl show "x500-video@$PROFILE.service" \
+        -p ActiveState --value 2>/dev/null)
+
+    if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+        VIDEO_FOUND=1
+
+        SUBSTATE=$(systemctl show "x500-video@$PROFILE.service" \
+            -p SubState --value 2>/dev/null)
+
+        echo "Service:       $STATE"
+        echo "Profile:       $PROFILE"
+        echo "SubState:      $SUBSTATE"
+
+        case "$PROFILE" in
+            high)
+                echo "Video:         640x480 @ 60 FPS"
+                echo "Target rate:   1200 kbps"
+                ;;
+            normal)
+                echo "Video:         640x480 @ 30 FPS"
+                echo "Target rate:   650 kbps"
+                ;;
+            degraded)
+                echo "Video:         480x360 @ 20 FPS"
+                echo "Target rate:   350 kbps"
+                ;;
+        esac
+
+        PROGRESS="/run/x500-video-${PROFILE}.progress"
+
+        if [ -f "$PROGRESS" ]; then
+            NOW=$(date +%s)
+            UPDATED=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0)
+            AGE=$((NOW - UPDATED))
+
+            if [ "$AGE" -le 3 ]; then
+                echo "SRT:           CONNECTED"
+            else
+                echo "SRT:           WAITING / RECONNECTING"
+            fi
+
+            RATE=$(grep '^bitrate=' "$PROGRESS" | tail -1 | cut -d= -f2-)
+            [ -n "$RATE" ] && echo "Actual rate:   $RATE"
+        else
+            echo "SRT:           WAITING FOR GROUND STATION"
+        fi
+
+        break
+    fi
+done
+
+if [ "$VIDEO_FOUND" -eq 0 ]; then
+    echo "Service:       stopped"
+fi
+
+echo
+
+echo "[MAVLINK]"
+
+ROUTER_STATE=$(systemctl is-active mavlink-router 2>/dev/null || true)
+echo "Router:        ${ROUTER_STATE:-unknown}"
+
+FC_PATH=""
+
+if [ -d /dev/serial/by-id ]; then
+    FC_PATH=$(find /dev/serial/by-id \
+        -maxdepth 1 \
+        -type l \
+        -name 'usb-Holybro_Pixhawk6C_*-if00' \
+        -print -quit 2>/dev/null)
+fi
+
+if [ -n "$FC_PATH" ]; then
+    echo "USB:           detected"
+else
+    echo "USB:           NOT detected"
+fi
+
+if [ "$ROUTER_STATE" = "active" ]; then
+
+    MAV_OUT=$(timeout 6 /home/PI_USER/x500-mavlink/bin/python - <<'PYMAV'
+from pymavlink import mavutil
+import time
+import math
+import sys
+
+def enum_name(group, value, fallback):
+    try:
+        return mavutil.mavlink.enums[group][value].name
+    except Exception:
+        return fallback
+
+def fmt(value, suffix=""):
+    if value is None:
+        return "-"
+    return f"{value}{suffix}"
+
+try:
+    m = mavutil.mavlink_connection("tcp:127.0.0.1:5760")
+
+    # ------------------------------------------------
+    # Find the actual ArduPilot vehicle heartbeat.
+    # mavlink-router is bidirectional, so Mission
+    # Planner/GCS heartbeats can appear here too.
+    # ------------------------------------------------
+    hb = None
+    gcs_seen = False
+    deadline = time.monotonic() + 2.5
+
+    while time.monotonic() < deadline:
+        x = m.recv_match(type="HEARTBEAT", blocking=True, timeout=0.5)
+
+        if x is None:
+            continue
+
+        if x.type == mavutil.mavlink.MAV_TYPE_GCS:
+            gcs_seen = True
+            continue
+
+        if x.autopilot == mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA:
+            hb = x
+            break
+
+    if hb is None:
+        print("Pixhawk:       OFFLINE / no vehicle heartbeat")
+        sys.exit(2)
+
+    sysid = hb.get_srcSystem()
+    compid = hb.get_srcComponent()
+
+    m.target_system = sysid
+    m.target_component = compid
+
+    # ------------------------------------------------
+    # Gather a short telemetry snapshot.
+    # ------------------------------------------------
+    messages = {
+        "SYS_STATUS": None,
+        "GPS_RAW_INT": None,
+        "ATTITUDE": None,
+        "GLOBAL_POSITION_INT": None,
+        "VFR_HUD": None,
+        "EKF_STATUS_REPORT": None,
+    }
+
+    end = time.monotonic() + 2.2
+
+    while time.monotonic() < end:
+        msg = m.recv_match(blocking=True, timeout=0.25)
+
+        if msg is None:
+            continue
+
+        t = msg.get_type()
+
+        if t == "HEARTBEAT":
+            if msg.type == mavutil.mavlink.MAV_TYPE_GCS:
+                gcs_seen = True
+            continue
+
+        # Ignore telemetry from anything except our vehicle.
+        if msg.get_srcSystem() != sysid:
+            continue
+
+        if t in messages:
+            messages[t] = msg
+
+    sys_status = messages["SYS_STATUS"]
+    gps = messages["GPS_RAW_INT"]
+    att = messages["ATTITUDE"]
+    gpos = messages["GLOBAL_POSITION_INT"]
+    hud = messages["VFR_HUD"]
+    ekf = messages["EKF_STATUS_REPORT"]
+
+    vehicle = {
+        mavutil.mavlink.MAV_TYPE_QUADROTOR: "Quadrotor"
+    }.get(
+        hb.type,
+        enum_name("MAV_TYPE", hb.type, str(hb.type))
+    )
+
+    autopilot = {
+        mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA: "ArduPilot"
+    }.get(
+        hb.autopilot,
+        enum_name("MAV_AUTOPILOT", hb.autopilot, str(hb.autopilot))
+    )
+
+    armed = bool(
+        hb.base_mode &
+        mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+    )
+
+    mode = mavutil.mode_string_v10(hb)
+
+    # ------------------------------------------------
+    # MAVLink / FC
+    # ------------------------------------------------
+    print("Pixhawk:       ONLINE")
+    print(f"Vehicle:       {vehicle} / {autopilot}")
+    print(f"System:        {sysid}:{compid}")
+    print(f"GCS heartbeat: {'ONLINE' if gcs_seen else 'not seen'}")
+
+    if sys_status is not None:
+        print(f"FC load:       {sys_status.load / 10.0:.1f}%")
+        print(f"Comm errors:   {int(sys_status.errors_comm)}")
+    else:
+        print("FC load:       -")
+        print("Comm errors:   -")
+
+    # ------------------------------------------------
+    # Flight
+    # ------------------------------------------------
+    print()
+    print("[FLIGHT]")
+    print(f"Mode:          {mode}")
+    print(f"Armed:         {'YES' if armed else 'NO'}")
+
+    if att is not None:
+        roll = math.degrees(att.roll)
+        pitch = math.degrees(att.pitch)
+        yaw = math.degrees(att.yaw) % 360
+
+        print(f"Roll:          {roll:+.1f} deg")
+        print(f"Pitch:         {pitch:+.1f} deg")
+        print(f"Yaw:           {yaw:.1f} deg")
+    else:
+        print("Roll:          -")
+        print("Pitch:         -")
+        print("Yaw:           -")
+
+    if hud is not None:
+        print(f"Heading:       {int(hud.heading)} deg")
+        print(f"Groundspeed:   {hud.groundspeed:.2f} m/s")
+    else:
+        print("Heading:       -")
+        print("Groundspeed:   -")
+
+    if gpos is not None:
+        print(f"Relative alt:  {gpos.relative_alt / 1000.0:.2f} m")
+    else:
+        print("Relative alt:  -")
+
+    # ------------------------------------------------
+    # GPS
+    # ------------------------------------------------
+    print()
+    print("[GPS]")
+
+    if gps is not None:
+        fix_names = {
+            0: "No GPS",
+            1: "No Fix",
+            2: "2D Fix",
+            3: "3D Fix",
+            4: "DGPS",
+            5: "RTK Float",
+            6: "RTK Fixed",
+            7: "Static",
+            8: "PPP",
+        }
+
+        fix = fix_names.get(gps.fix_type, str(gps.fix_type))
+
+        sats = gps.satellites_visible
+        sats_text = "-" if sats == 255 else str(sats)
+
+        print(f"Fix:           {fix}")
+        print(f"Satellites:    {sats_text}")
+
+        if gps.fix_type >= 3 and gpos is not None:
+            lat = gpos.lat / 1e7
+            lon = gpos.lon / 1e7
+
+            print(f"Latitude:      {lat:.7f}")
+            print(f"Longitude:     {lon:.7f}")
+        else:
+            print("Latitude:      -")
+            print("Longitude:     -")
+    else:
+        print("Fix:           unavailable")
+        print("Satellites:    -")
+        print("Latitude:      -")
+        print("Longitude:     -")
+
+    # ------------------------------------------------
+    # Battery
+    # ------------------------------------------------
+    print()
+    print("[BATTERY]")
+
+    batt_valid = False
+
+    if sys_status is not None:
+        mv = int(sys_status.voltage_battery)
+
+        # USB-powered Pixhawk can report tiny/placeholder
+        # values. Never treat those as a flight battery.
+        if 5000 <= mv < 65535:
+            batt_valid = True
+            volts = mv / 1000.0
+
+            print(f"Voltage:       {volts:.2f} V")
+
+            current = int(sys_status.current_battery)
+            if current >= 0:
+                print(f"Current:       {current / 100.0:.2f} A")
+            else:
+                print("Current:       -")
+
+            remaining = int(sys_status.battery_remaining)
+            if 0 <= remaining <= 100:
+                print(f"Remaining:     {remaining}%")
+            else:
+                print("Remaining:     -")
+
+    if not batt_valid:
+        print("Voltage:       unavailable")
+        print("Current:       -")
+        print("Remaining:     -")
+
+    # ------------------------------------------------
+    # EKF / Navigation
+    # ------------------------------------------------
+    print()
+    print("[NAVIGATION]")
+
+    if ekf is not None:
+        flags = int(ekf.flags)
+
+        attitude_ok = bool(flags & 1)
+        horiz_rel = bool(flags & 8)
+        horiz_abs = bool(flags & 16)
+        vert_abs = bool(flags & 32)
+
+        if horiz_abs:
+            horizontal = "ABS position OK"
+        elif horiz_rel:
+            horizontal = "REL position OK"
+        else:
+            horizontal = "NO horizontal position"
+
+        print(f"EKF attitude:  {'OK' if attitude_ok else 'NOT READY'}")
+        print(f"Horizontal:    {horizontal}")
+        print(f"Vertical:      {'OK' if vert_abs else 'NOT READY'}")
+        print(f"EKF flags:     {flags}")
+    else:
+        print("EKF attitude:  unavailable")
+        print("Horizontal:    unavailable")
+        print("Vertical:      unavailable")
+        print("EKF flags:     -")
+
+except Exception as e:
+    print(f"Pixhawk:       ERROR ({type(e).__name__}: {e})")
+    sys.exit(2)
+PYMAV
+    )
+
+    MAV_RC=$?
+
+    if [ "$MAV_RC" -eq 0 ]; then
+        printf '%s\n' "$MAV_OUT"
+    else
+        printf '%s\n' "$MAV_OUT"
+        echo
+        echo "[FLIGHT]"
+        echo "Telemetry:     unavailable"
+    fi
+
+else
+    echo "Pixhawk:       unavailable while router is inactive"
+fi
+
+echo
+echo "================================"

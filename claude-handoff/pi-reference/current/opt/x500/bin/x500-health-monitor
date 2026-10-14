@@ -1,0 +1,15 @@
+#!/bin/bash
+
+LAST=""
+
+while true; do
+    KEY=$(/usr/local/bin/x500-health --key 2>/dev/null)
+
+    if [ "$KEY" != "$LAST" ]; then
+        DETAILS=$(/usr/local/bin/x500-health --machine 2>/dev/null)
+        logger -t x500-health-monitor "$KEY | $DETAILS"
+        LAST="$KEY"
+    fi
+
+    sleep 15
+done

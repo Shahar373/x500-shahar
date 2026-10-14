@@ -1,0 +1,13 @@
+[Unit]
+Description=X500 Network Health Monitor
+After=NetworkManager.service tailscaled.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/opt/x500/bin/x500-net-monitor
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

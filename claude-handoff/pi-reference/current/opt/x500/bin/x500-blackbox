@@ -1,0 +1,104 @@
+#!/bin/bash
+
+INTERVAL=10
+LOGDIR="/var/log/x500/blackbox"
+
+mkdir -p "$LOGDIR"
+
+while true; do
+
+    DATE=$(date '+%Y%m%d')
+    FILE="$LOGDIR/x500-blackbox-$DATE.csv"
+
+    if [ ! -f "$FILE" ]; then
+        echo "timestamp,temp_c,throttled,ram_pct,disk_pct,load1,uplink,wifi_internet,lte_internet,tailscale,ground,video_profile,video_state,mavlink" > "$FILE"
+    fi
+
+    TIMESTAMP=$(date --iso-8601=seconds)
+
+    TEMP=$(vcgencmd measure_temp 2>/dev/null \
+        | sed -E "s/.*=([0-9.]+).*/\1/" || echo "NA")
+
+    THROTTLED=$(vcgencmd get_throttled 2>/dev/null \
+        | cut -d= -f2 || echo "NA")
+
+    RAM=$(free | awk '/^Mem:/ {printf "%.0f", ($3/$2)*100}')
+
+    DISK=$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')
+
+    LOAD=$(awk '{print $1}' /proc/loadavg)
+
+    ROUTE=$(ip route get 1.1.1.1 2>/dev/null | head -1)
+
+    if echo "$ROUTE" | grep -q "dev wlan0"; then
+        UPLINK="wifi"
+    elif echo "$ROUTE" | grep -q "dev eth1"; then
+        UPLINK="lte"
+    else
+        UPLINK="none"
+    fi
+
+    if ping -I wlan0 -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+        WIFI="ok"
+    else
+        WIFI="fail"
+    fi
+
+    if ping -I eth1 -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+        LTE="ok"
+    else
+        LTE="fail"
+    fi
+
+    if systemctl -q is-active tailscaled; then
+        TS="active"
+    else
+        TS="down"
+    fi
+
+    if ping -c1 -W1 GROUND_STATION_IP_NOT_CONFIGURED >/dev/null 2>&1; then
+        GROUND="reachable"
+    else
+        GROUND="unreachable"
+    fi
+
+    VIDEO_PROFILE="none"
+    VIDEO_STATE="stopped"
+
+    for P in high normal degraded; do
+        STATE=$(systemctl show "x500-video@$P.service" \
+            -p ActiveState --value 2>/dev/null)
+
+        if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+            VIDEO_PROFILE="$P"
+
+            PROGRESS="/run/x500-video-${P}.progress"
+
+            if [ -f "$PROGRESS" ]; then
+                NOW=$(date +%s)
+                UPDATED=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0)
+                AGE=$((NOW - UPDATED))
+
+                if [ "$AGE" -le 3 ]; then
+                    VIDEO_STATE="connected"
+                else
+                    VIDEO_STATE="waiting"
+                fi
+            else
+                VIDEO_STATE="waiting"
+            fi
+
+            break
+        fi
+    done
+
+    if systemctl -q is-active mavlink-router; then
+        MAVLINK="active"
+    else
+        MAVLINK="inactive"
+    fi
+
+    echo "$TIMESTAMP,$TEMP,$THROTTLED,$RAM,$DISK,$LOAD,$UPLINK,$WIFI,$LTE,$TS,$GROUND,$VIDEO_PROFILE,$VIDEO_STATE,$MAVLINK" >> "$FILE"
+
+    sleep "$INTERVAL"
+done

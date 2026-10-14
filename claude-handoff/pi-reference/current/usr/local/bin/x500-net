@@ -1,0 +1,67 @@
+#!/bin/bash
+
+GROUND_IP="GROUND_STATION_IP_NOT_CONFIGURED"
+ZTE_GW="ZTE_GATEWAY_IP_NOT_CONFIGURED"
+
+echo "============================"
+echo " X500 Network Status"
+echo "============================"
+echo
+
+echo "[INTERFACES]"
+ip -br addr show wlan0 2>/dev/null || true
+ip -br addr show eth1 2>/dev/null || true
+ip -br addr show tailscale0 2>/dev/null || true
+echo
+
+echo "[DEFAULT ROUTES]"
+ip route show default
+echo
+
+echo "[ACTIVE INTERNET ROUTE]"
+ip route get 1.1.1.1 2>/dev/null | head -1 || echo "No route"
+echo
+
+echo "[WIFI]"
+if ip link show wlan0 >/dev/null 2>&1; then
+    if ping -I wlan0 -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+        echo "Internet:      OK"
+    else
+        echo "Internet:      FAIL"
+    fi
+else
+    echo "Interface:     missing"
+fi
+echo
+
+echo "[ZTE / LTE]"
+if ip link show eth1 >/dev/null 2>&1; then
+    if ping -I eth1 -c1 -W1 "$ZTE_GW" >/dev/null 2>&1; then
+        echo "ZTE gateway:   OK"
+    else
+        echo "ZTE gateway:   FAIL"
+    fi
+
+    if ping -I eth1 -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+        echo "LTE Internet:  OK"
+    else
+        echo "LTE Internet:  FAIL"
+    fi
+else
+    echo "Interface:     missing"
+fi
+echo
+
+echo "[TAILSCALE]"
+echo "Service:       $(systemctl is-active tailscaled 2>/dev/null)"
+TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "Local IP:      ${TSIP:-unavailable}"
+
+if ping -c1 -W2 "$GROUND_IP" >/dev/null 2>&1; then
+    echo "Ground station: REACHABLE"
+else
+    echo "Ground station: UNREACHABLE"
+fi
+echo
+
+echo "============================"

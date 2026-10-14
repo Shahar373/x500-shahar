@@ -1,0 +1,132 @@
+#!/bin/bash
+
+echo "================================"
+echo " X500 Companion Computer Status"
+echo "================================"
+echo
+
+echo "[SYSTEM]"
+echo "Hostname:      $(hostname)"
+echo "Uptime:        $(uptime -p)"
+echo "Kernel:        $(uname -r)"
+echo "Temperature:   $(vcgencmd measure_temp 2>/dev/null || echo unavailable)"
+echo "Throttling:    $(vcgencmd get_throttled 2>/dev/null || echo unavailable)"
+echo
+
+echo "[MEMORY]"
+free -h | awk '/Mem:/ {print "RAM:           used "$3" / "$2}'
+echo
+
+echo "[STORAGE]"
+df -h / | awk 'NR==2 {print "Root FS:       used "$3" / "$2" ("$5")"}'
+echo
+
+echo "[NETWORK]"
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status
+echo
+echo "Default routes:"
+ip route show default
+echo
+
+if ping -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+    echo "Internet:      OK"
+else
+    echo "Internet:      FAIL"
+fi
+
+echo
+echo "[TAILSCALE]"
+echo "Service:       $(systemctl is-active tailscaled 2>/dev/null)"
+TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "IPv4:          ${TSIP:-unavailable}"
+echo
+
+echo "[ZTE LTE]"
+if ip link show eth1 >/dev/null 2>&1; then
+    echo "Interface:     eth1 present"
+    ip -br addr show eth1
+else
+    echo "Interface:     not present"
+fi
+echo
+
+echo "[CAMERA]"
+if rpicam-hello --list-cameras 2>/dev/null | grep -qi imx219; then
+    echo "IMX219:        detected"
+else
+    echo "IMX219:        NOT detected"
+fi
+echo
+
+echo "[WATCHDOG]"
+systemctl show \
+    -p RuntimeWatchdogUSec \
+    -p RebootWatchdogUSec 2>/dev/null
+
+echo
+echo "[VIDEO]"
+VIDEO_FOUND=0
+
+for PROFILE in high normal degraded; do
+    STATE=$(systemctl show "x500-video@$PROFILE.service" \
+        -p ActiveState --value 2>/dev/null)
+
+    if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+        VIDEO_FOUND=1
+
+        SUBSTATE=$(systemctl show "x500-video@$PROFILE.service" \
+            -p SubState --value 2>/dev/null)
+
+        echo "Service:       $STATE"
+        echo "Profile:       $PROFILE"
+        echo "SubState:      $SUBSTATE"
+
+        case "$PROFILE" in
+            high)
+                echo "Video:         640x480 @ 60 FPS"
+                echo "Target rate:   1200 kbps"
+                ;;
+            normal)
+                echo "Video:         640x480 @ 30 FPS"
+                echo "Target rate:   650 kbps"
+                ;;
+            degraded)
+                echo "Video:         480x360 @ 20 FPS"
+                echo "Target rate:   350 kbps"
+                ;;
+        esac
+
+        PROGRESS="/run/x500-video-${PROFILE}.progress"
+
+        if [ -f "$PROGRESS" ]; then
+            NOW=$(date +%s)
+            UPDATED=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0)
+            AGE=$((NOW - UPDATED))
+
+            if [ "$AGE" -le 3 ]; then
+                echo "SRT:           CONNECTED"
+            else
+                echo "SRT:           WAITING / RECONNECTING"
+            fi
+
+            RATE=$(grep '^bitrate=' "$PROGRESS" | tail -1 | cut -d= -f2-)
+            [ -n "$RATE" ] && echo "Actual rate:   $RATE"
+        else
+            echo "SRT:           WAITING FOR GROUND STATION"
+        fi
+
+        break
+    fi
+done
+
+if [ "$VIDEO_FOUND" -eq 0 ]; then
+    echo "Service:       stopped"
+fi
+
+echo
+
+echo "[MAVLINK]"
+echo "Router:        $(systemctl is-active mavlink-router 2>/dev/null)"
+echo
+
+echo "================================"

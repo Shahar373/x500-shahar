@@ -1,0 +1,296 @@
+#!/bin/bash
+
+MODE="${1:-bench}"
+
+GROUND_IP="GROUND_STATION_IP_NOT_CONFIGURED"
+ZTE_GW="ZTE_GATEWAY_IP_NOT_CONFIGURED"
+
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+
+pass() {
+    echo "[PASS] $1"
+    PASS_COUNT=$((PASS_COUNT + 1))
+}
+
+warn() {
+    echo "[WARN] $1"
+    WARN_COUNT=$((WARN_COUNT + 1))
+}
+
+fail() {
+    echo "[FAIL] $1"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+info() {
+    echo "[INFO] $1"
+}
+
+echo "========================================"
+echo " X500 Companion Computer Preflight"
+echo " Mode: $MODE"
+echo "========================================"
+echo
+
+if [ "$MODE" != "bench" ] && [ "$MODE" != "flight" ]; then
+    echo "Usage:"
+    echo "  x500-preflight"
+    echo "  x500-preflight flight"
+    exit 2
+fi
+
+# --------------------------------------------------
+# Pi health
+# --------------------------------------------------
+
+HEALTH=$(/usr/local/bin/x500-health --key 2>/dev/null)
+
+if echo "$HEALTH" | grep -q 'state=OK'; then
+    pass "Pi health OK"
+elif echo "$HEALTH" | grep -q 'state=WARN'; then
+    warn "Pi health reports warning"
+else
+    fail "Pi health is CRITICAL or unavailable"
+fi
+
+TEMP=$(vcgencmd measure_temp 2>/dev/null | sed -E "s/.*=([0-9.]+).*/\1/")
+
+if [ -n "$TEMP" ]; then
+    if awk "BEGIN {exit !($TEMP < 75)}"; then
+        pass "Temperature ${TEMP} C"
+    elif awk "BEGIN {exit !($TEMP < 82)}"; then
+        warn "Temperature high: ${TEMP} C"
+    else
+        fail "Temperature critical: ${TEMP} C"
+    fi
+else
+    warn "Unable to read temperature"
+fi
+
+THROTTLED=$(vcgencmd get_throttled 2>/dev/null)
+
+if [ "$THROTTLED" = "throttled=0x0" ]; then
+    pass "No undervoltage/throttling detected"
+else
+    fail "Power/throttling flags: ${THROTTLED:-unknown}"
+fi
+
+# --------------------------------------------------
+# Watchdog
+# --------------------------------------------------
+
+RUNTIME_WD=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null)
+REBOOT_WD=$(systemctl show -p RebootWatchdogUSec --value 2>/dev/null)
+
+if [ "$RUNTIME_WD" = "15s" ]; then
+    pass "Runtime watchdog active (15s)"
+else
+    warn "Runtime watchdog unexpected: ${RUNTIME_WD:-unknown}"
+fi
+
+if [ "$REBOOT_WD" = "2min" ]; then
+    pass "Reboot watchdog active (2min)"
+else
+    warn "Reboot watchdog unexpected: ${REBOOT_WD:-unknown}"
+fi
+
+# --------------------------------------------------
+# Black box
+# --------------------------------------------------
+
+if systemctl -q is-active x500-blackbox; then
+    FILE="/var/log/x500/blackbox/x500-blackbox-$(date +%Y%m%d).csv"
+
+    if [ -f "$FILE" ]; then
+        NOW=$(date +%s)
+        MTIME=$(stat -c %Y "$FILE" 2>/dev/null || echo 0)
+        AGE=$((NOW - MTIME))
+
+        if [ "$AGE" -le 30 ]; then
+            pass "Black Box logging healthy (${AGE}s old)"
+        else
+            warn "Black Box sample stale (${AGE}s old)"
+        fi
+    else
+        warn "Black Box running but today's file is missing"
+    fi
+else
+    warn "Black Box service is not running"
+fi
+
+# --------------------------------------------------
+# Camera
+# --------------------------------------------------
+
+if timeout 5 rpicam-hello --list-cameras 2>/dev/null | grep -qi imx219; then
+    pass "IMX219 camera detected"
+else
+    if [ "$MODE" = "flight" ]; then
+        warn "Camera not detected"
+    else
+        warn "Camera not detected"
+    fi
+fi
+
+# --------------------------------------------------
+# Network
+# --------------------------------------------------
+
+ROUTE=$(ip route get 1.1.1.1 2>/dev/null | head -1)
+
+if echo "$ROUTE" | grep -q 'dev wlan0'; then
+    UPLINK="Wi-Fi (wlan0)"
+elif echo "$ROUTE" | grep -q 'dev eth1'; then
+    UPLINK="LTE/ZTE (eth1)"
+else
+    UPLINK="none"
+fi
+
+info "Active uplink: $UPLINK"
+
+if ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+    pass "Internet connectivity"
+else
+    warn "No Internet connectivity"
+fi
+
+if ping -I eth1 -c1 -W1 "$ZTE_GW" >/dev/null 2>&1; then
+    pass "ZTE USB link reachable"
+else
+    warn "ZTE gateway unavailable"
+fi
+
+if ping -I eth1 -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+    pass "LTE Internet available"
+else
+    if [ "$MODE" = "flight" ]; then
+        warn "LTE Internet unavailable"
+    else
+        info "LTE Internet unavailable (expected without SIM)"
+    fi
+fi
+
+# --------------------------------------------------
+# Tailscale / Ground Station
+# --------------------------------------------------
+
+if systemctl -q is-active tailscaled; then
+    TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+
+    if [ -n "$TSIP" ]; then
+        pass "Tailscale active ($TSIP)"
+    else
+        warn "Tailscale service active but no IPv4 address"
+    fi
+else
+    warn "Tailscale service inactive"
+fi
+
+if ping -c1 -W2 "$GROUND_IP" >/dev/null 2>&1; then
+    pass "Ground Station reachable ($GROUND_IP)"
+else
+    warn "Ground Station unreachable"
+fi
+
+# --------------------------------------------------
+# Video
+# --------------------------------------------------
+
+VIDEO_PROFILE=""
+
+for P in high normal degraded; do
+    STATE=$(systemctl show "x500-video@$P.service" \
+        -p ActiveState --value 2>/dev/null)
+
+    if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+        VIDEO_PROFILE="$P"
+        break
+    fi
+done
+
+if [ -n "$VIDEO_PROFILE" ]; then
+    PROGRESS="/run/x500-video-${VIDEO_PROFILE}.progress"
+
+    if [ -f "$PROGRESS" ]; then
+        NOW=$(date +%s)
+        UPDATED=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0)
+        AGE=$((NOW - UPDATED))
+
+        if [ "$AGE" -le 3 ]; then
+            pass "Video $VIDEO_PROFILE connected"
+        else
+            info "Video $VIDEO_PROFILE running, waiting for Ground Station"
+        fi
+    else
+        info "Video $VIDEO_PROFILE running, waiting for Ground Station"
+    fi
+else
+    info "Video stopped"
+fi
+
+# --------------------------------------------------
+# Flight controller / MAVLink
+# --------------------------------------------------
+
+FC=""
+
+if [ -d /dev/serial/by-id ]; then
+    FC=$(find /dev/serial/by-id -maxdepth 1 -type l 2>/dev/null | head -1)
+fi
+
+if [ -z "$FC" ]; then
+    for D in /dev/ttyACM* /dev/ttyUSB*; do
+        if [ -e "$D" ]; then
+            FC="$D"
+            break
+        fi
+    done
+fi
+
+if [ -n "$FC" ]; then
+    pass "Flight controller serial device detected"
+    info "FC device: $FC"
+else
+    if [ "$MODE" = "flight" ]; then
+        fail "No flight controller serial device detected"
+    else
+        info "Pixhawk not connected (expected in bench mode)"
+    fi
+fi
+
+if systemctl -q is-active mavlink-router; then
+    pass "MAVLink Router active"
+else
+    if [ "$MODE" = "flight" ]; then
+        fail "MAVLink Router inactive"
+    else
+        info "MAVLink Router inactive (expected in bench mode)"
+    fi
+fi
+
+# --------------------------------------------------
+# Summary
+# --------------------------------------------------
+
+echo
+echo "========================================"
+echo " SUMMARY"
+echo "========================================"
+echo "PASS: $PASS_COUNT"
+echo "WARN: $WARN_COUNT"
+echo "FAIL: $FAIL_COUNT"
+echo
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "PREFLIGHT: FAIL"
+    echo "Run: sudo x500-diag"
+    exit 2
+elif [ "$WARN_COUNT" -gt 0 ]; then
+    echo "PREFLIGHT: PASS WITH WARNINGS"
+    exit 1
+else
+    echo "PREFLIGHT: PASS"
+    exit 0
+fi

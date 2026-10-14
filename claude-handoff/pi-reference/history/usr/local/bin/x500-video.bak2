@@ -1,0 +1,79 @@
+#!/bin/bash
+set -e
+
+profiles="high normal degraded"
+
+active_profile() {
+    for p in $profiles; do
+        if systemctl --quiet is-active "x500-video@$p.service"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+case "${1:-status}" in
+    high|normal|degraded)
+        if current=$(active_profile); then
+            echo "Video already running with profile: $current"
+            echo "Run: x500-video stop"
+            exit 1
+        fi
+
+        echo "Starting X500 video: $1"
+        sudo systemctl start "x500-video@$1.service"
+        sleep 1
+
+        if systemctl --quiet is-active "x500-video@$1.service"; then
+            echo "Running."
+        else
+            echo "Failed to start."
+            sudo journalctl -u "x500-video@$1.service" -n 20 --no-pager
+            exit 1
+        fi
+        ;;
+
+    stop)
+        for p in $profiles; do
+            sudo systemctl stop "x500-video@$p.service" 2>/dev/null || true
+        done
+        echo "X500 video stopped."
+        ;;
+
+    status)
+        if current=$(active_profile); then
+            echo "X500 video: RUNNING"
+            echo "Profile:    $current"
+            systemctl show "x500-video@$current.service" \
+                -p MainPID \
+                -p ActiveState \
+                -p SubState \
+                -p MemoryCurrent \
+                --no-pager
+        else
+            echo "X500 video: STOPPED"
+        fi
+        ;;
+
+    logs)
+        if current=$(active_profile); then
+            journalctl -u "x500-video@$current.service" -f
+        else
+            echo "No active video stream."
+            echo "Recent logs:"
+            journalctl -u 'x500-video@*' -n 30 --no-pager
+        fi
+        ;;
+
+    *)
+        echo "Usage:"
+        echo "  x500-video high"
+        echo "  x500-video normal"
+        echo "  x500-video degraded"
+        echo "  x500-video stop"
+        echo "  x500-video status"
+        echo "  x500-video logs"
+        exit 2
+        ;;
+esac

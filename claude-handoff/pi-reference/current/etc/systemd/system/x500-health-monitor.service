@@ -1,0 +1,12 @@
+[Unit]
+Description=X500 Raspberry Pi Health Monitor
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/opt/x500/bin/x500-health-monitor
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

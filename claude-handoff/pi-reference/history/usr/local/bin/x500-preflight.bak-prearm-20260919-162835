@@ -1,0 +1,538 @@
+#!/bin/bash
+
+MODE="${1:-bench}"
+
+GROUND_IP="GROUND_STATION_IP_NOT_CONFIGURED"
+ZTE_GW="ZTE_GATEWAY_IP_NOT_CONFIGURED"
+
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+
+pass() {
+    echo "[PASS] $1"
+    PASS_COUNT=$((PASS_COUNT + 1))
+}
+
+warn() {
+    echo "[WARN] $1"
+    WARN_COUNT=$((WARN_COUNT + 1))
+}
+
+fail() {
+    echo "[FAIL] $1"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+info() {
+    echo "[INFO] $1"
+}
+
+echo "========================================"
+echo " X500 Companion Computer Preflight"
+echo " Mode: $MODE"
+echo "========================================"
+echo
+
+if [ "$MODE" != "bench" ] && [ "$MODE" != "flight" ]; then
+    echo "Usage:"
+    echo "  x500-preflight"
+    echo "  x500-preflight flight"
+    exit 2
+fi
+
+# --------------------------------------------------
+# Pi health
+# --------------------------------------------------
+
+HEALTH=$(/usr/local/bin/x500-health --key 2>/dev/null)
+
+if echo "$HEALTH" | grep -q 'state=OK'; then
+    pass "Pi health OK"
+elif echo "$HEALTH" | grep -q 'state=WARN'; then
+    warn "Pi health reports warning"
+else
+    fail "Pi health is CRITICAL or unavailable"
+fi
+
+TEMP=$(vcgencmd measure_temp 2>/dev/null | sed -E "s/.*=([0-9.]+).*/\1/")
+
+if [ -n "$TEMP" ]; then
+    if awk "BEGIN {exit !($TEMP < 75)}"; then
+        pass "Temperature ${TEMP} C"
+    elif awk "BEGIN {exit !($TEMP < 82)}"; then
+        warn "Temperature high: ${TEMP} C"
+    else
+        fail "Temperature critical: ${TEMP} C"
+    fi
+else
+    warn "Unable to read temperature"
+fi
+
+THROTTLED=$(vcgencmd get_throttled 2>/dev/null)
+
+if [ "$THROTTLED" = "throttled=0x0" ]; then
+    pass "No undervoltage/throttling detected"
+else
+    fail "Power/throttling flags: ${THROTTLED:-unknown}"
+fi
+
+# --------------------------------------------------
+# Watchdog
+# --------------------------------------------------
+
+RUNTIME_WD=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null)
+REBOOT_WD=$(systemctl show -p RebootWatchdogUSec --value 2>/dev/null)
+
+if [ "$RUNTIME_WD" = "15s" ]; then
+    pass "Runtime watchdog active (15s)"
+else
+    warn "Runtime watchdog unexpected: ${RUNTIME_WD:-unknown}"
+fi
+
+if [ "$REBOOT_WD" = "2min" ]; then
+    pass "Reboot watchdog active (2min)"
+else
+    warn "Reboot watchdog unexpected: ${REBOOT_WD:-unknown}"
+fi
+
+# --------------------------------------------------
+# Black box
+# --------------------------------------------------
+
+if systemctl -q is-active x500-blackbox; then
+    FILE="/var/log/x500/blackbox/x500-blackbox-$(date +%Y%m%d).csv"
+
+    if [ -f "$FILE" ]; then
+        NOW=$(date +%s)
+        MTIME=$(stat -c %Y "$FILE" 2>/dev/null || echo 0)
+        AGE=$((NOW - MTIME))
+
+        if [ "$AGE" -le 30 ]; then
+            pass "Black Box logging healthy (${AGE}s old)"
+        else
+            warn "Black Box sample stale (${AGE}s old)"
+        fi
+    else
+        warn "Black Box running but today's file is missing"
+    fi
+else
+    warn "Black Box service is not running"
+fi
+
+# --------------------------------------------------
+# Camera
+# --------------------------------------------------
+
+if timeout 5 rpicam-hello --list-cameras 2>/dev/null | grep -qi imx219; then
+    pass "IMX219 camera detected"
+else
+    if [ "$MODE" = "flight" ]; then
+        warn "Camera not detected"
+    else
+        warn "Camera not detected"
+    fi
+fi
+
+# --------------------------------------------------
+# Network
+# --------------------------------------------------
+
+ROUTE=$(ip route get 1.1.1.1 2>/dev/null | head -1)
+
+if echo "$ROUTE" | grep -q 'dev wlan0'; then
+    UPLINK="Wi-Fi (wlan0)"
+elif echo "$ROUTE" | grep -q 'dev eth1'; then
+    UPLINK="LTE/ZTE (eth1)"
+else
+    UPLINK="none"
+fi
+
+info "Active uplink: $UPLINK"
+
+if ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+    pass "Internet connectivity"
+else
+    warn "No Internet connectivity"
+fi
+
+if ping -I eth1 -c1 -W1 "$ZTE_GW" >/dev/null 2>&1; then
+    pass "ZTE USB link reachable"
+else
+    warn "ZTE gateway unavailable"
+fi
+
+if ping -I eth1 -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+    pass "LTE Internet available"
+else
+    if [ "$MODE" = "flight" ]; then
+        warn "LTE Internet unavailable"
+    else
+        info "LTE Internet unavailable (expected without SIM)"
+    fi
+fi
+
+# --------------------------------------------------
+# Tailscale / Ground Station
+# --------------------------------------------------
+
+if systemctl -q is-active tailscaled; then
+    TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+
+    if [ -n "$TSIP" ]; then
+        pass "Tailscale active ($TSIP)"
+    else
+        warn "Tailscale service active but no IPv4 address"
+    fi
+else
+    warn "Tailscale service inactive"
+fi
+
+if ping -c1 -W2 "$GROUND_IP" >/dev/null 2>&1; then
+    pass "Ground Station reachable ($GROUND_IP)"
+else
+    warn "Ground Station unreachable"
+fi
+
+# --------------------------------------------------
+# Video
+# --------------------------------------------------
+
+VIDEO_PROFILE=""
+
+for P in high normal degraded; do
+    STATE=$(systemctl show "x500-video@$P.service" \
+        -p ActiveState --value 2>/dev/null)
+
+    if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+        VIDEO_PROFILE="$P"
+        break
+    fi
+done
+
+if [ -n "$VIDEO_PROFILE" ]; then
+    PROGRESS="/run/x500-video-${VIDEO_PROFILE}.progress"
+
+    if [ -f "$PROGRESS" ]; then
+        NOW=$(date +%s)
+        UPDATED=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0)
+        AGE=$((NOW - UPDATED))
+
+        if [ "$AGE" -le 3 ]; then
+            pass "Video $VIDEO_PROFILE connected"
+        else
+            info "Video $VIDEO_PROFILE running, waiting for Ground Station"
+        fi
+    else
+        info "Video $VIDEO_PROFILE running, waiting for Ground Station"
+    fi
+else
+    info "Video stopped"
+fi
+
+# --------------------------------------------------
+# Flight controller / MAVLink
+# --------------------------------------------------
+
+# Prefer the stable USB by-id name for Pixhawk MAVLink interface 0.
+FC=""
+
+if [ -d /dev/serial/by-id ]; then
+    FC=$(find /dev/serial/by-id \
+        -maxdepth 1 \
+        -type l \
+        -name 'usb-Holybro_Pixhawk6C_*-if00' \
+        -print \
+        -quit 2>/dev/null)
+fi
+
+# Fallback only if the stable by-id path is unavailable.
+if [ -z "$FC" ] && [ -e /dev/ttyACM0 ]; then
+    FC="/dev/ttyACM0"
+fi
+
+if [ -n "$FC" ]; then
+    pass "Pixhawk USB detected"
+    info "FC device: $FC"
+else
+    if [ "$MODE" = "flight" ]; then
+        fail "Pixhawk USB not detected"
+    else
+        warn "Pixhawk USB not detected"
+    fi
+fi
+
+ROUTER_OK=0
+
+if systemctl -q is-active mavlink-router; then
+    pass "MAVLink Router active"
+    ROUTER_OK=1
+else
+    if [ "$MODE" = "flight" ]; then
+        fail "MAVLink Router inactive"
+    else
+        warn "MAVLink Router inactive"
+    fi
+fi
+
+# Read telemetry through mavlink-router.
+# Never open the Pixhawk serial device directly here.
+if [ "$ROUTER_OK" -eq 1 ]; then
+
+    MAVLINK_OUT=$(timeout 12 /home/PI_USER/x500-mavlink/bin/python - <<'PYMAV'
+from pymavlink import mavutil
+import time
+import sys
+
+try:
+    m = mavutil.mavlink_connection("tcp:127.0.0.1:5760")
+
+    # mavlink-router is bidirectional, so we may also see
+    # heartbeats from Mission Planner/GCS. Wait specifically
+    # for an ArduPilot vehicle heartbeat.
+    hb = None
+    hb_deadline = time.monotonic() + 5
+
+    while time.monotonic() < hb_deadline:
+        candidate = m.recv_match(
+            type="HEARTBEAT",
+            blocking=True,
+            timeout=1
+        )
+
+        if candidate is None:
+            continue
+
+        if (
+            candidate.autopilot ==
+            mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA
+            and
+            candidate.type != mavutil.mavlink.MAV_TYPE_GCS
+        ):
+            hb = candidate
+            m.target_system = candidate.get_srcSystem()
+            m.target_component = candidate.get_srcComponent()
+            break
+
+    if hb is None:
+        print("ERROR=no ArduPilot vehicle heartbeat")
+        sys.exit(1)
+
+    def enum_name(group, value, fallback):
+        try:
+            return mavutil.mavlink.enums[group][value].name
+        except Exception:
+            return fallback
+
+    vehicle = enum_name("MAV_TYPE", hb.type, str(hb.type))
+    autopilot = enum_name("MAV_AUTOPILOT", hb.autopilot, str(hb.autopilot))
+
+    armed = bool(
+        hb.base_mode &
+        mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+    )
+
+    print("HEARTBEAT=1")
+    print(f"SYSID={hb.get_srcSystem()}")
+    print(f"COMPID={hb.get_srcComponent()}")
+    print(f"VEHICLE={vehicle}")
+    print(f"AUTOPILOT={autopilot}")
+    print(f"MODE={mavutil.mode_string_v10(hb)}")
+    print(f"ARMED={'YES' if armed else 'NO'}")
+
+    gps = None
+    sys_status = None
+    ekf = None
+
+    deadline = time.monotonic() + 6
+
+    while time.monotonic() < deadline:
+        msg = m.recv_match(blocking=True, timeout=1)
+
+        if msg is None:
+            continue
+
+        t = msg.get_type()
+
+        if t == "GPS_RAW_INT":
+            gps = msg
+        elif t == "SYS_STATUS":
+            sys_status = msg
+        elif t == "EKF_STATUS_REPORT":
+            ekf = msg
+
+        if gps is not None and sys_status is not None and ekf is not None:
+            break
+
+    if gps is not None:
+        fix_names = {
+            0: "No GPS",
+            1: "No Fix",
+            2: "2D Fix",
+            3: "3D Fix",
+            4: "DGPS",
+            5: "RTK Float",
+            6: "RTK Fixed",
+            7: "Static",
+            8: "PPP",
+        }
+
+        print(f"GPS_FIX_TYPE={gps.fix_type}")
+        print(f"GPS_FIX={fix_names.get(gps.fix_type, str(gps.fix_type))}")
+        print(f"SATELLITES={gps.satellites_visible}")
+    else:
+        print("GPS_FIX_TYPE=-1")
+        print("GPS_FIX=Unavailable")
+        print("SATELLITES=-1")
+
+    if sys_status is not None:
+        v = int(sys_status.voltage_battery)
+        remaining = int(sys_status.battery_remaining)
+
+        if 0 < v < 65535:
+            print(f"BATT_VOLTAGE={v / 1000.0:.2f}")
+        else:
+            print("BATT_VOLTAGE=NA")
+
+        if 0 <= remaining <= 100:
+            print(f"BATT_REMAINING={remaining}")
+        else:
+            print("BATT_REMAINING=NA")
+    else:
+        print("BATT_VOLTAGE=NA")
+        print("BATT_REMAINING=NA")
+
+    if ekf is not None:
+        print(f"EKF_FLAGS={int(ekf.flags)}")
+    else:
+        print("EKF_FLAGS=NA")
+
+except Exception as e:
+    print(f"ERROR={type(e).__name__}: {e}")
+    sys.exit(1)
+PYMAV
+    )
+
+    MAV_RC=$?
+
+    if [ "$MAV_RC" -eq 0 ] && \
+       echo "$MAVLINK_OUT" | grep -q '^HEARTBEAT=1$'; then
+
+        pass "MAVLink heartbeat received"
+
+        SYSID=$(echo "$MAVLINK_OUT" | awk -F= '$1=="SYSID"{print $2}')
+        COMPID=$(echo "$MAVLINK_OUT" | awk -F= '$1=="COMPID"{print $2}')
+        VEHICLE=$(echo "$MAVLINK_OUT" | awk -F= '$1=="VEHICLE"{print $2}')
+        AUTOPILOT=$(echo "$MAVLINK_OUT" | awk -F= '$1=="AUTOPILOT"{print $2}')
+        FLIGHTMODE=$(echo "$MAVLINK_OUT" | awk -F= '$1=="MODE"{print $2}')
+        ARMED=$(echo "$MAVLINK_OUT" | awk -F= '$1=="ARMED"{print $2}')
+        GPS_FIX_TYPE=$(echo "$MAVLINK_OUT" | awk -F= '$1=="GPS_FIX_TYPE"{print $2}')
+        GPS_FIX=$(echo "$MAVLINK_OUT" | awk -F= '$1=="GPS_FIX"{print $2}')
+        SATELLITES=$(echo "$MAVLINK_OUT" | awk -F= '$1=="SATELLITES"{print $2}')
+        BATT_VOLTAGE=$(echo "$MAVLINK_OUT" | awk -F= '$1=="BATT_VOLTAGE"{print $2}')
+        BATT_REMAINING=$(echo "$MAVLINK_OUT" | awk -F= '$1=="BATT_REMAINING"{print $2}')
+        EKF_FLAGS=$(echo "$MAVLINK_OUT" | awk -F= '$1=="EKF_FLAGS"{print $2}')
+
+        info "Vehicle: ${VEHICLE:-unknown} / ${AUTOPILOT:-unknown}"
+        info "MAVLink System: ${SYSID:-?}, Component: ${COMPID:-?}"
+        info "Flight mode: ${FLIGHTMODE:-unknown}"
+
+        if [ "$ARMED" = "NO" ]; then
+            pass "Vehicle disarmed"
+        else
+            fail "Vehicle is ARMED"
+        fi
+
+        # GPS
+        if [ "${GPS_FIX_TYPE:-0}" -ge 3 ] 2>/dev/null; then
+            pass "GPS: ${GPS_FIX} (${SATELLITES} satellites)"
+        else
+            if [ "$MODE" = "flight" ]; then
+                fail "GPS not flight-ready: ${GPS_FIX:-Unavailable} (${SATELLITES:-?} satellites)"
+            else
+                info "GPS: ${GPS_FIX:-Unavailable} (${SATELLITES:-?} satellites)"
+            fi
+        fi
+
+        # Battery
+        # Never accept USB/placeholder battery values as a flight battery.
+        BATT_VALID=0
+
+        if [[ "$BATT_VOLTAGE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            if awk -v v="$BATT_VOLTAGE" 'BEGIN { exit !(v >= 5.0) }'; then
+                BATT_VALID=1
+            fi
+        fi
+
+        if [ "$BATT_VALID" -eq 1 ]; then
+            if [[ "$BATT_REMAINING" =~ ^[0-9]+$ ]]; then
+                pass "Battery telemetry: ${BATT_VOLTAGE} V (${BATT_REMAINING}% remaining)"
+            else
+                pass "Battery telemetry: ${BATT_VOLTAGE} V"
+            fi
+        else
+            if [ "$MODE" = "flight" ]; then
+                fail "Battery telemetry unavailable or invalid (${BATT_VOLTAGE:-NA} V)"
+            else
+                info "Battery telemetry unavailable or invalid (${BATT_VOLTAGE:-NA} V)"
+            fi
+        fi
+
+        # EKF
+        if [ "$EKF_FLAGS" != "NA" ] && [ -n "$EKF_FLAGS" ]; then
+            info "EKF status flags: $EKF_FLAGS"
+
+            # Bit 0 = attitude estimate valid.
+            if [ $((EKF_FLAGS & 1)) -ne 0 ]; then
+                pass "EKF attitude estimate valid"
+            else
+                if [ "$MODE" = "flight" ]; then
+                    fail "EKF attitude estimate not valid"
+                else
+                    warn "EKF attitude estimate not valid"
+                fi
+            fi
+        else
+            if [ "$MODE" = "flight" ]; then
+                warn "EKF status report unavailable"
+            else
+                info "EKF status report unavailable"
+            fi
+        fi
+
+    else
+        if [ "$MODE" = "flight" ]; then
+            fail "No MAVLink heartbeat through router"
+        else
+            warn "No MAVLink heartbeat through router"
+        fi
+
+        ERROR=$(echo "$MAVLINK_OUT" | grep '^ERROR=' | head -1 | cut -d= -f2-)
+        [ -n "$ERROR" ] && info "MAVLink error: $ERROR"
+    fi
+fi
+
+# --------------------------------------------------
+# Summary
+# --------------------------------------------------
+
+echo
+echo "========================================"
+echo " SUMMARY"
+echo "========================================"
+echo "PASS: $PASS_COUNT"
+echo "WARN: $WARN_COUNT"
+echo "FAIL: $FAIL_COUNT"
+echo
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "PREFLIGHT: FAIL"
+    echo "Run: sudo x500-diag"
+    exit 2
+elif [ "$WARN_COUNT" -gt 0 ]; then
+    echo "PREFLIGHT: PASS WITH WARNINGS"
+    exit 1
+else
+    echo "PREFLIGHT: PASS"
+    exit 0
+fi

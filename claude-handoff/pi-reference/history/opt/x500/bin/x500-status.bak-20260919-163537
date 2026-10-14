@@ -1,0 +1,163 @@
+#!/bin/bash
+
+echo "================================"
+echo " X500 Companion Computer Status"
+echo "================================"
+echo
+
+echo "[SYSTEM]"
+echo "Hostname:      $(hostname)"
+echo "Uptime:        $(uptime -p)"
+echo "Kernel:        $(uname -r)"
+echo "Temperature:   $(vcgencmd measure_temp 2>/dev/null || echo unavailable)"
+echo "Throttling:    $(vcgencmd get_throttled 2>/dev/null || echo unavailable)"
+echo
+
+echo "[HEALTH]"
+HEALTH_KEY=$(/usr/local/bin/x500-health --key 2>/dev/null)
+HEALTH_STATE=$(echo "$HEALTH_KEY" | sed -n 's/.*state=\([^ ]*\).*/\1/p')
+
+echo "Overall:       ${HEALTH_STATE:-UNKNOWN}"
+echo "Monitor:       $(systemctl is-active x500-health-monitor 2>/dev/null)"
+
+TEMP_H=$(echo "$HEALTH_KEY" | sed -n 's/.*temp=\([^ ]*\).*/\1/p')
+POWER_H=$(echo "$HEALTH_KEY" | sed -n 's/.*power=\([^ ]*\).*/\1/p')
+RAM_H=$(echo "$HEALTH_KEY" | sed -n 's/.*ram=\([^ ]*\).*/\1/p')
+DISK_H=$(echo "$HEALTH_KEY" | sed -n 's/.*disk=\([^ ]*\).*/\1/p')
+
+echo "Temperature:   ${TEMP_H:-unknown}"
+echo "Power:         ${POWER_H:-unknown}"
+echo "RAM:           ${RAM_H:-unknown}"
+echo "Storage:       ${DISK_H:-unknown}"
+echo
+
+echo "[MEMORY]"
+free -h | awk '/Mem:/ {print "RAM:           used "$3" / "$2}'
+echo
+
+echo "[STORAGE]"
+df -h / | awk 'NR==2 {print "Root FS:       used "$3" / "$2" ("$5")"}'
+echo
+
+echo "[NETWORK]"
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status
+echo
+echo "Default routes:"
+ip route show default
+echo
+
+ACTIVE_ROUTE=$(ip route get 1.1.1.1 2>/dev/null | head -1)
+
+if echo "$ACTIVE_ROUTE" | grep -q "dev wlan0"; then
+    echo "Active uplink: Wi-Fi (wlan0)"
+elif echo "$ACTIVE_ROUTE" | grep -q "dev eth1"; then
+    echo "Active uplink: LTE/ZTE (eth1)"
+else
+    echo "Active uplink: UNKNOWN"
+fi
+
+echo "Net monitor:   $(systemctl is-active x500-net-monitor 2>/dev/null)"
+echo
+
+if ping -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+    echo "Internet:      OK"
+else
+    echo "Internet:      FAIL"
+fi
+
+echo
+echo "[TAILSCALE]"
+echo "Service:       $(systemctl is-active tailscaled 2>/dev/null)"
+TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "IPv4:          ${TSIP:-unavailable}"
+echo
+
+echo "[ZTE LTE]"
+if ip link show eth1 >/dev/null 2>&1; then
+    echo "Interface:     eth1 present"
+    ip -br addr show eth1
+else
+    echo "Interface:     not present"
+fi
+echo
+
+echo "[CAMERA]"
+if rpicam-hello --list-cameras 2>/dev/null | grep -qi imx219; then
+    echo "IMX219:        detected"
+else
+    echo "IMX219:        NOT detected"
+fi
+echo
+
+echo "[WATCHDOG]"
+systemctl show \
+    -p RuntimeWatchdogUSec \
+    -p RebootWatchdogUSec 2>/dev/null
+
+echo
+echo "[VIDEO]"
+VIDEO_FOUND=0
+
+for PROFILE in high normal degraded; do
+    STATE=$(systemctl show "x500-video@$PROFILE.service" \
+        -p ActiveState --value 2>/dev/null)
+
+    if [ "$STATE" = "active" ] || [ "$STATE" = "activating" ]; then
+        VIDEO_FOUND=1
+
+        SUBSTATE=$(systemctl show "x500-video@$PROFILE.service" \
+            -p SubState --value 2>/dev/null)
+
+        echo "Service:       $STATE"
+        echo "Profile:       $PROFILE"
+        echo "SubState:      $SUBSTATE"
+
+        case "$PROFILE" in
+            high)
+                echo "Video:         640x480 @ 60 FPS"
+                echo "Target rate:   1200 kbps"
+                ;;
+            normal)
+                echo "Video:         640x480 @ 30 FPS"
+                echo "Target rate:   650 kbps"
+                ;;
+            degraded)
+                echo "Video:         480x360 @ 20 FPS"
+                echo "Target rate:   350 kbps"
+                ;;
+        esac
+
+        PROGRESS="/run/x500-video-${PROFILE}.progress"
+
+        if [ -f "$PROGRESS" ]; then
+            NOW=$(date +%s)
+            UPDATED=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo 0)
+            AGE=$((NOW - UPDATED))
+
+            if [ "$AGE" -le 3 ]; then
+                echo "SRT:           CONNECTED"
+            else
+                echo "SRT:           WAITING / RECONNECTING"
+            fi
+
+            RATE=$(grep '^bitrate=' "$PROGRESS" | tail -1 | cut -d= -f2-)
+            [ -n "$RATE" ] && echo "Actual rate:   $RATE"
+        else
+            echo "SRT:           WAITING FOR GROUND STATION"
+        fi
+
+        break
+    fi
+done
+
+if [ "$VIDEO_FOUND" -eq 0 ]; then
+    echo "Service:       stopped"
+fi
+
+echo
+
+echo "[MAVLINK]"
+echo "Router:        $(systemctl is-active mavlink-router 2>/dev/null)"
+echo
+
+echo "================================"

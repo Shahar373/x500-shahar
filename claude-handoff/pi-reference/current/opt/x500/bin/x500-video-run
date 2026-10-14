@@ -1,0 +1,96 @@
+#!/bin/bash
+set -euo pipefail
+
+source /etc/x500/video.conf
+
+LISTEN_IP="$(tailscale ip -4 2>/dev/null | head -1)"
+
+if [ -z "$LISTEN_IP" ]; then
+    echo "ERROR: No Tailscale IPv4 address available"
+    exit 10
+fi
+
+PROFILE="${1:-normal}"
+
+case "$PROFILE" in
+    high)
+        WIDTH=640
+        HEIGHT=480
+        FPS=60
+        BITRATE=1200k
+        BUFSIZE=200k
+        GOP=60
+        LATENCY=120000
+        ;;
+    normal)
+        WIDTH=640
+        HEIGHT=480
+        FPS=30
+        BITRATE=650k
+        BUFSIZE=200k
+        GOP=30
+        LATENCY=180000
+        ;;
+    degraded)
+        WIDTH=480
+        HEIGHT=360
+        FPS=20
+        BITRATE=350k
+        BUFSIZE=120k
+        GOP=20
+        LATENCY=300000
+        ;;
+    *)
+        echo "Unknown profile: $PROFILE"
+        exit 2
+        ;;
+esac
+
+rm -f "/run/x500-video-${PROFILE}.progress"
+
+echo "Starting X500 video profile: $PROFILE"
+echo "${WIDTH}x${HEIGHT} @ ${FPS} FPS, bitrate=${BITRATE}"
+echo "Listening on: ${LISTEN_IP}:${PORT}"
+echo "SRT latency: ${LATENCY} us"
+
+exec bash -c "
+set -o pipefail
+
+rpicam-vid \
+  -t 0 \
+  -n \
+  --codec yuv420 \
+  --denoise cdn_off \
+  --width ${WIDTH} \
+  --height ${HEIGHT} \
+  --framerate ${FPS} \
+  -o - \
+| ffmpeg \
+  -hide_banner \
+  -loglevel warning \
+  -progress /run/x500-video-${PROFILE}.progress \
+  -stats_period 1 \
+  -f rawvideo \
+  -pix_fmt yuv420p \
+  -video_size ${WIDTH}x${HEIGHT} \
+  -framerate ${FPS} \
+  -i - \
+  -an \
+  -c:v libx264 \
+  -preset ultrafast \
+  -tune zerolatency \
+  -profile:v baseline \
+  -bf 0 \
+  -refs 1 \
+  -g ${GOP} \
+  -keyint_min ${GOP} \
+  -b:v ${BITRATE} \
+  -maxrate ${BITRATE} \
+  -bufsize ${BUFSIZE} \
+  -x264-params 'scenecut=0:rc-lookahead=0:sync-lookahead=0:repeat-headers=1:sliced-threads=1' \
+  -muxdelay 0 \
+  -muxpreload 0 \
+  -flush_packets 1 \
+  -f mpegts \
+  'srt://${LISTEN_IP}:${PORT}?mode=listener&transtype=live&latency=${LATENCY}&tlpktdrop=1&pkt_size=1316'
+"

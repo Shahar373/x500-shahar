@@ -1,0 +1,60 @@
+#!/bin/bash
+
+echo "================================"
+echo " X500 Flight Controller Detect"
+echo "================================"
+echo
+
+echo "[SERIAL BY-ID]"
+if [ -d /dev/serial/by-id ] && compgen -G "/dev/serial/by-id/*" >/dev/null; then
+    ls -l /dev/serial/by-id/
+else
+    echo "No /dev/serial/by-id devices found"
+fi
+
+echo
+echo "[CANDIDATE DEVICES]"
+
+FOUND=0
+
+for dev in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -e "$dev" ] || continue
+    FOUND=1
+
+    echo
+    echo "Device: $dev"
+
+    udevadm info --query=property --name="$dev" 2>/dev/null \
+        | grep -E '^(ID_VENDOR=|ID_VENDOR_ID=|ID_MODEL=|ID_MODEL_ID=|ID_SERIAL=|ID_SERIAL_SHORT=|DEVLINKS=)' \
+        || true
+done
+
+if [ "$FOUND" -eq 0 ]; then
+    echo "No ttyACM/ttyUSB flight-controller candidates found"
+fi
+
+echo
+echo "[USER ACCESS]"
+echo "User:          ${SUDO_USER:-$USER}"
+echo "Groups:        $(id -nG "${SUDO_USER:-$USER}")"
+
+if id -nG "${SUDO_USER:-$USER}" | grep -qw dialout; then
+    echo "Serial access: OK (dialout)"
+else
+    echo "Serial access: WARNING - user is not in dialout"
+fi
+
+echo
+echo "[MAVLINK ROUTER]"
+echo "Installed:     $(command -v mavlink-routerd 2>/dev/null || echo no)"
+echo "Service:       $(systemctl is-active mavlink-router 2>/dev/null)"
+echo "Enabled:       $(systemctl is-enabled mavlink-router 2>/dev/null)"
+
+echo
+echo "[RECENT USB/SERIAL EVENTS]"
+journalctl -k -n 100 --no-pager 2>/dev/null \
+    | grep -Ei 'ttyACM|ttyUSB|cdc_acm|usb.*serial' \
+    | tail -20 || true
+
+echo
+echo "================================"

@@ -1,0 +1,17 @@
+[Unit]
+Description=X500 Video Stream (%i)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/opt/x500/bin/x500-video-run %i
+
+Restart=always
+RestartSec=3
+
+KillMode=control-group
+TimeoutStopSec=5
+
+[Install]

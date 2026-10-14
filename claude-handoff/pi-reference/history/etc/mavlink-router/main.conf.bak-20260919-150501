@@ -1,0 +1,14 @@
+[General]
+TcpServerPort = 0
+ReportStats = false
+DebugLogLevel = info
+
+[TcpEndpoint sitl]
+Address = 127.0.0.1
+Port = 5760
+RetryTimeout = 2
+
+[UdpEndpoint groundstation]
+Mode = Normal
+Address = GROUND_STATION_IP_NOT_CONFIGURED
+Port = 14550

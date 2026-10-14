@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# X500 Raspberry Pi health check
+
+TEMP_RAW=$(vcgencmd measure_temp 2>/dev/null || echo "temp=0")
+TEMP=$(echo "$TEMP_RAW" | sed -E "s/.*=([0-9.]+).*/\1/")
+
+THROTTLED_RAW=$(vcgencmd get_throttled 2>/dev/null || echo "throttled=0x0")
+THROTTLED_HEX="${THROTTLED_RAW#throttled=}"
+
+if [[ "$THROTTLED_HEX" =~ ^0x[0-9A-Fa-f]+$ ]]; then
+    THROTTLED=$((THROTTLED_HEX))
+else
+    THROTTLED=0
+fi
+
+CURRENT_POWER=$((THROTTLED & 0xF))
+HIST_POWER=$((THROTTLED & 0xF0000))
+
+MEM=$(free | awk '/^Mem:/ {printf "%.0f", ($3/$2)*100}')
+DISK=$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')
+
+LOAD1=$(awk '{print $1}' /proc/loadavg)
+CORES=$(nproc)
+
+STATE="OK"
+
+TEMP_STATE="normal"
+MEM_STATE="normal"
+DISK_STATE="normal"
+POWER_STATE="normal"
+
+# Temperature
+if awk "BEGIN {exit !($TEMP >= 82)}"; then
+    TEMP_STATE="critical"
+    STATE="CRITICAL"
+elif awk "BEGIN {exit !($TEMP >= 75)}"; then
+    TEMP_STATE="warn"
+    [ "$STATE" = "OK" ] && STATE="WARN"
+fi
+
+# Current undervoltage / throttling / frequency cap / soft temp limit
+if [ "$CURRENT_POWER" -ne 0 ]; then
+    POWER_STATE="current_fault"
+    STATE="CRITICAL"
+elif [ "$HIST_POWER" -ne 0 ]; then
+    POWER_STATE="historical_event"
+fi
+
+# RAM
+if [ "$MEM" -ge 90 ]; then
+    MEM_STATE="warn"
+    [ "$STATE" = "OK" ] && STATE="WARN"
+fi
+
+# Storage
+if [ "$DISK" -ge 95 ]; then
+    DISK_STATE="critical"
+    STATE="CRITICAL"
+elif [ "$DISK" -ge 85 ]; then
+    DISK_STATE="warn"
+    [ "$STATE" = "OK" ] && STATE="WARN"
+fi
+
+if [ "${1:-}" = "--key" ]; then
+    echo "state=$STATE temp=$TEMP_STATE power=$POWER_STATE ram=$MEM_STATE disk=$DISK_STATE"
+    exit 0
+fi
+
+if [ "${1:-}" = "--machine" ]; then
+    echo "state=$STATE temp=${TEMP}C power=$THROTTLED_RAW ram=${MEM}% disk=${DISK}% load=$LOAD1 cores=$CORES"
+    exit 0
+fi
+
+echo "============================"
+echo " X500 Pi Health"
+echo "============================"
+echo
+echo "Overall:       $STATE"
+echo
+echo "Temperature:   ${TEMP}°C [$TEMP_STATE]"
+echo "Power/Throttle:$THROTTLED_RAW [$POWER_STATE]"
+echo "RAM usage:     ${MEM}% [$MEM_STATE]"
+echo "Disk usage:    ${DISK}% [$DISK_STATE]"
+echo "Load (1 min):  $LOAD1 / $CORES cores"
+echo
+echo "============================"
+
+case "$STATE" in
+    OK)       exit 0 ;;
+    WARN)     exit 1 ;;
+    CRITICAL) exit 2 ;;
+esac

@@ -1,0 +1,289 @@
+{
+  "snapshot_date": "2026-10-14",
+  "source_archive": "x500-pi-source-20261014-101501.tar.gz",
+  "scope": "offline source review; no scripts executed and no hardware accessed",
+  "current_file_count": 22,
+  "historical_file_count": 13,
+  "redaction_occurrences": 29,
+  "sanitization": [
+    "ground station IP replaced",
+    "modem gateway IP replaced",
+    "home account component replaced",
+    "exact Pixhawk serial ID replaced"
+  ],
+  "not_changed": [
+    "loopback address",
+    "public Internet probe address",
+    "ports",
+    "service names",
+    "legacy check logic; reviewed issues remain in reference files"
+  ],
+  "bash_syntax_checks": [
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-video-run",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-health-monitor",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-status",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-net-monitor",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-blackbox",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-blackbox-status",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-diag",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-fc-detect",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-health",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-net",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-preflight",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-status",
+      "bash_syntax_ok": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-video",
+      "bash_syntax_ok": true
+    }
+  ],
+  "embedded_python_blocks_syntax_checked": 5,
+  "secret_pattern_candidates": [],
+  "files": [
+    {
+      "path": "pi-reference/history/opt/x500/bin/x500-status.bak-network",
+      "original_path": "/opt/x500/bin/x500-status.bak-network",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-video-run",
+      "original_path": "/opt/x500/bin/x500-video-run",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/opt/x500/bin/x500-status.bak",
+      "original_path": "/opt/x500/bin/x500-status.bak",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-health-monitor",
+      "original_path": "/opt/x500/bin/x500-health-monitor",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-status",
+      "original_path": "/opt/x500/bin/x500-status",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-net-monitor",
+      "original_path": "/opt/x500/bin/x500-net-monitor",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/opt/x500/bin/x500-blackbox",
+      "original_path": "/opt/x500/bin/x500-blackbox",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/opt/x500/bin/x500-status.bak-20260919-163537",
+      "original_path": "/opt/x500/bin/x500-status.bak-20260919-163537",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/opt/x500/bin/x500-status.bak-health",
+      "original_path": "/opt/x500/bin/x500-status.bak-health",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-blackbox-status",
+      "original_path": "/usr/local/bin/x500-blackbox-status",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-diag",
+      "original_path": "/usr/local/bin/x500-diag",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-diag.bak-video",
+      "original_path": "/usr/local/bin/x500-diag.bak-video",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-fc-detect",
+      "original_path": "/usr/local/bin/x500-fc-detect",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-health",
+      "original_path": "/usr/local/bin/x500-health",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-net",
+      "original_path": "/usr/local/bin/x500-net",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-preflight",
+      "original_path": "/usr/local/bin/x500-preflight",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-preflight.bak-20260919-162252",
+      "original_path": "/usr/local/bin/x500-preflight.bak-20260919-162252",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-preflight.bak-fix-mavlink-20260919-162444",
+      "original_path": "/usr/local/bin/x500-preflight.bak-fix-mavlink-20260919-162444",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-preflight.bak-prearm-20260919-162835",
+      "original_path": "/usr/local/bin/x500-preflight.bak-prearm-20260919-162835",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-preflight.bak-sensors-20260919-163041",
+      "original_path": "/usr/local/bin/x500-preflight.bak-sensors-20260919-163041",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-status",
+      "original_path": "/usr/local/bin/x500-status",
+      "historical": false,
+      "archive_hardlink": true
+    },
+    {
+      "path": "pi-reference/current/usr/local/bin/x500-video",
+      "original_path": "/usr/local/bin/x500-video",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-video.bak",
+      "original_path": "/usr/local/bin/x500-video.bak",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/usr/local/bin/x500-video.bak2",
+      "original_path": "/usr/local/bin/x500-video.bak2",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/x500/video.conf",
+      "original_path": "/etc/x500/video.conf",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/etc/mavlink-router/main.conf.bak-20260919-150501",
+      "original_path": "/etc/mavlink-router/main.conf.bak-20260919-150501",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/history/etc/mavlink-router/main.sitl.conf",
+      "original_path": "/etc/mavlink-router/main.sitl.conf",
+      "historical": true,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/mavlink-router/main.conf",
+      "original_path": "/etc/mavlink-router/main.conf",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/system/x500-blackbox.service",
+      "original_path": "/etc/systemd/system/x500-blackbox.service",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/system/x500-health-monitor.service",
+      "original_path": "/etc/systemd/system/x500-health-monitor.service",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/system/x500-net-monitor.service",
+      "original_path": "/etc/systemd/system/x500-net-monitor.service",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/system/x500-video@.service",
+      "original_path": "/etc/systemd/system/x500-video@.service",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/system.conf",
+      "original_path": "/etc/systemd/system.conf",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/system.conf.d/60-x500-watchdog.conf",
+      "original_path": "/etc/systemd/system.conf.d/60-x500-watchdog.conf",
+      "historical": false,
+      "archive_hardlink": false
+    },
+    {
+      "path": "pi-reference/current/etc/systemd/journald.conf.d/60-x500.conf",
+      "original_path": "/etc/systemd/journald.conf.d/60-x500.conf",
+      "historical": false,
+      "archive_hardlink": false
+    }
+  ]
+}

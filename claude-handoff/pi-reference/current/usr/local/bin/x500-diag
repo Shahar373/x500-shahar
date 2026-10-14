@@ -1,0 +1,187 @@
+#!/bin/bash
+
+set -u
+
+OUTDIR="/var/log/x500/diag"
+TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+OUTFILE="${OUTDIR}/x500-diag-${TIMESTAMP}.txt"
+
+CALLER="${SUDO_USER:-$USER}"
+
+mkdir -p "$OUTDIR"
+
+section() {
+    echo
+    echo "============================================================"
+    echo "$1"
+    echo "============================================================"
+}
+
+{
+    echo "X500 DIAGNOSTIC REPORT"
+    echo "Generated: $(date --iso-8601=seconds)"
+    echo "Hostname:  $(hostname)"
+
+    section "X500 STATUS"
+    /usr/local/bin/x500-status 2>&1 || true
+
+    section "X500 HEALTH"
+    /usr/local/bin/x500-health 2>&1 || true
+
+    section "X500 NETWORK"
+    /usr/local/bin/x500-net 2>&1 || true
+
+    section "SYSTEM"
+    uname -a
+    echo
+    uptime
+    echo
+    free -h
+    echo
+    df -h /
+    echo
+    echo "CPU cores: $(nproc)"
+    echo "Load:      $(cat /proc/loadavg)"
+
+    section "POWER / THERMAL"
+    vcgencmd measure_temp 2>&1 || true
+    vcgencmd get_throttled 2>&1 || true
+    echo
+    systemctl show \
+        -p RuntimeWatchdogUSec \
+        -p RebootWatchdogUSec 2>&1 || true
+
+    section "NETWORK INTERFACES"
+    ip -br addr 2>&1 || true
+
+    echo
+    echo "--- Routes ---"
+    ip route 2>&1 || true
+
+    echo
+    echo "--- Rules ---"
+    ip rule 2>&1 || true
+
+    echo
+    echo "--- Route to Internet ---"
+    ip route get 1.1.1.1 2>&1 || true
+
+    section "NETWORKMANAGER"
+    nmcli -f DEVICE,TYPE,STATE,CONNECTION device status 2>&1 || true
+
+    echo
+    echo "--- Connections ---"
+    nmcli -f NAME,TYPE,DEVICE,AUTOCONNECT connection show 2>&1 || true
+
+    section "TAILSCALE"
+    tailscale status 2>&1 || true
+
+    echo
+    echo "--- Tailscale IP ---"
+    tailscale ip -4 2>&1 || true
+
+    echo
+    echo "--- Tailscale Netcheck ---"
+    timeout 15 tailscale netcheck 2>&1 || true
+
+    section "USB"
+    lsusb 2>&1 || true
+
+    section "CAMERA"
+    timeout 10 rpicam-hello --list-cameras 2>&1 || true
+
+    section "VIDEO"
+    /usr/local/bin/x500-video status 2>&1 || true
+
+    for f in /run/x500-video-*.progress; do
+        if [ -f "$f" ]; then
+            echo
+            echo "--- $f ---"
+            tail -20 "$f"
+        fi
+    done
+
+    section "IMPORTANT SERVICES"
+
+    for svc in \
+        NetworkManager \
+        tailscaled \
+        x500-net-monitor \
+        x500-health-monitor \
+        mavlink-router
+    do
+        echo
+        echo "--- $svc ---"
+        systemctl status "$svc" --no-pager -l 2>&1 || true
+    done
+
+    echo
+    echo "--- Video services ---"
+    systemctl list-units \
+        'x500-video@*' \
+        --all \
+        --no-pager 2>&1 || true
+
+    section "FAILED SERVICES"
+    systemctl --failed --no-pager 2>&1 || true
+
+    section "NETWORK MONITOR LOG"
+    journalctl \
+        -t x500-net-monitor \
+        -n 50 \
+        --no-pager \
+        -o short-iso 2>&1 || true
+
+    section "HEALTH MONITOR LOG"
+    journalctl \
+        -t x500-health-monitor \
+        -n 50 \
+        --no-pager \
+        -o short-iso 2>&1 || true
+
+    section "VIDEO LOG"
+    journalctl \
+        -u x500-video@high.service \
+        -u x500-video@normal.service \
+        -u x500-video@degraded.service \
+        -n 100 \
+        --no-pager \
+        -o short-iso 2>&1 || true
+
+    section "MAVLINK LOG"
+    journalctl \
+        -u mavlink-router \
+        -n 50 \
+        --no-pager \
+        -o short-iso 2>&1 || true
+
+    section "RECENT KERNEL EVENTS"
+    journalctl \
+        -k \
+        -n 250 \
+        --no-pager \
+        -o short-iso 2>&1 || true
+
+    section "RELEVANT KERNEL WARNINGS"
+    journalctl -k --no-pager -o short-iso 2>&1 \
+        | grep -Ei \
+        'under.?voltage|thrott|thermal|usb|eth1|wlan0|imx219|camera|mmc|i/o error' \
+        | tail -100 || true
+
+    section "END"
+    echo "Diagnostic completed: $(date --iso-8601=seconds)"
+
+} > "$OUTFILE"
+
+if id "$CALLER" >/dev/null 2>&1; then
+    chown "$CALLER":"$(id -gn "$CALLER")" "$OUTFILE"
+    chmod 600 "$OUTFILE"
+fi
+
+ln -sfn "$OUTFILE" "${OUTDIR}/latest.txt"
+
+echo
+echo "X500 diagnostic completed."
+echo "Report: $OUTFILE"
+echo
+echo "Latest: ${OUTDIR}/latest.txt"

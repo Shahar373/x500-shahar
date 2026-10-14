@@ -1,0 +1,71 @@
+#!/bin/bash
+
+echo "================================"
+echo " X500 Companion Computer Status"
+echo "================================"
+echo
+
+echo "[SYSTEM]"
+echo "Hostname:      $(hostname)"
+echo "Uptime:        $(uptime -p)"
+echo "Kernel:        $(uname -r)"
+echo "Temperature:   $(vcgencmd measure_temp 2>/dev/null || echo unavailable)"
+echo "Throttling:    $(vcgencmd get_throttled 2>/dev/null || echo unavailable)"
+echo
+
+echo "[MEMORY]"
+free -h | awk '/Mem:/ {print "RAM:           used "$3" / "$2}'
+echo
+
+echo "[STORAGE]"
+df -h / | awk 'NR==2 {print "Root FS:       used "$3" / "$2" ("$5")"}'
+echo
+
+echo "[NETWORK]"
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status
+echo
+echo "Default routes:"
+ip route show default
+echo
+
+if ping -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+    echo "Internet:      OK"
+else
+    echo "Internet:      FAIL"
+fi
+
+echo
+echo "[TAILSCALE]"
+echo "Service:       $(systemctl is-active tailscaled 2>/dev/null)"
+TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "IPv4:          ${TSIP:-unavailable}"
+echo
+
+echo "[ZTE LTE]"
+if ip link show eth1 >/dev/null 2>&1; then
+    echo "Interface:     eth1 present"
+    ip -br addr show eth1
+else
+    echo "Interface:     not present"
+fi
+echo
+
+echo "[CAMERA]"
+if rpicam-hello --list-cameras 2>/dev/null | grep -qi imx219; then
+    echo "IMX219:        detected"
+else
+    echo "IMX219:        NOT detected"
+fi
+echo
+
+echo "[WATCHDOG]"
+systemctl show \
+    -p RuntimeWatchdogUSec \
+    -p RebootWatchdogUSec 2>/dev/null
+
+echo
+echo "[MAVLINK]"
+echo "Router:        $(systemctl is-active mavlink-router 2>/dev/null)"
+echo
+
+echo "================================"

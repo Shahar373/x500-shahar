@@ -1,0 +1,57 @@
+#!/bin/bash
+
+GROUND_IP="GROUND_STATION_IP_NOT_CONFIGURED"
+ZTE_GW="ZTE_GATEWAY_IP_NOT_CONFIGURED"
+
+last=""
+
+while true; do
+    ROUTE=$(ip route get 1.1.1.1 2>/dev/null | head -1)
+
+    if echo "$ROUTE" | grep -q "dev wlan0"; then
+        ACTIVE="wlan0"
+    elif echo "$ROUTE" | grep -q "dev eth1"; then
+        ACTIVE="eth1"
+    else
+        ACTIVE="none"
+    fi
+
+    if ping -I wlan0 -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+        WIFI="ok"
+    else
+        WIFI="fail"
+    fi
+
+    if ping -I eth1 -c1 -W1 "$ZTE_GW" >/dev/null 2>&1; then
+        ZTE="ok"
+    else
+        ZTE="fail"
+    fi
+
+    if ping -I eth1 -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+        LTE="ok"
+    else
+        LTE="fail"
+    fi
+
+    if systemctl -q is-active tailscaled; then
+        TS="active"
+    else
+        TS="down"
+    fi
+
+    if ping -c1 -W1 "$GROUND_IP" >/dev/null 2>&1; then
+        GROUND="reachable"
+    else
+        GROUND="unreachable"
+    fi
+
+    current="route=$ACTIVE wifi=$WIFI zte=$ZTE lte=$LTE tailscale=$TS ground=$GROUND"
+
+    if [ "$current" != "$last" ]; then
+        logger -t x500-net-monitor "$current"
+        last="$current"
+    fi
+
+    sleep 10
+done
