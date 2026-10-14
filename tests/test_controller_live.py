@@ -99,7 +99,11 @@ def test_live_end_to_end(live, tmp_path):
     # the app never sent anything but read requests
     sent = {t for _, _, t, _ in ap.received}
     assert sent <= {"PARAM_REQUEST_READ", "COMMAND_LONG"}
-    assert all(d.get("command") == 512 for _, _, t, d in ap.received if t == "COMMAND_LONG")
+    assert wait(lambda: (ctl.store.get("mav.prearm_diag") or None)
+                and ctl.store.get("mav.prearm_diag").value["state"] == "complete")
+    cmds = [d.get("command") for _, _, t, d in ap.received if t == "COMMAND_LONG"]
+    assert set(cmds) <= {512, 401}  # REQUEST_MESSAGE + RUN_PREARM_CHECKS (explicit preflight only)
+    assert cmds.count(401) == 1
 
     # interruption + automatic reconnect
     sshd.kill_connections()

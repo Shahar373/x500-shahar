@@ -66,9 +66,21 @@ def fc_identity(ctx, cfg):
         if have < want:
             return R(Status.FAIL, "גרסת הקושחה ישנה מהמינימום שהוגדר.", observed=observed,
                      expected=f"≥ {ltr(min_fw)}", source=src, age_s=age, evidence=ev)
+    others = sorted({o.key[len("mav.peer."):].split(".")[0] for o in ctx.snap.with_prefix("mav.peer.")
+                     if isinstance(o.value, dict) and P.is_autopilot_heartbeat(o.value)
+                     and o.age(ctx.snap.now_mono) <= 10})
+    ev["other_autopilots_sysid"] = others
     expl = "בקר הטיסה מזוהה כ-ArduPilot מסוג הכלי הצפוי."
     if not fw:
         expl += " גרסת הקושחה לא התקבלה (AUTOPILOT_VERSION)."
+    if others:
+        observed += " · עוד בקרי טיסה בקישור: sysid " + ltr(", ".join(others))
+        if not ctx.drone.mav_target_sysid:
+            return R(Status.WARN, "בקישור נראים כמה בקרי טיסה, והאפליקציה בחרה את הראשון שנראה. "
+                     "קבע 'sysid של הרחפן' בהגדרות כדי לבחור במפורש. נתונים משאר בקרי הטיסה מסוננים.",
+                     observed=observed, expected="בקר טיסה אחד, או sysid שנקבע בהגדרות", source=src,
+                     age_s=age, evidence=ev)
+        expl += " נראים גם בקרי טיסה אחרים; הנתונים שלהם מסוננים (sysid נקבע בהגדרות)."
     return R(Status.PASS, expl, observed=observed, expected=expected, source=src, age_s=age, evidence=ev)
 
 
@@ -171,43 +183,118 @@ def fc_arming_checks(ctx, cfg):
              source=src, age_s=age, evidence=ev)
 
 
+DIAG_STATE_HE = {
+    "sent": "הבקשה נשלחה, ממתין לתשובה מבקר הטיסה",
+    "accepted": "בקר הטיסה אישר את הבקשה, ממתין ל-SYS_STATUS טרי",
+    "no_ack": "בקר הטיסה לא ענה לבקשה (אין COMMAND_ACK מה-sysid של הרחפן)",
+    "no_fresh_sys_status": "בקר הטיסה אישר, אבל לא הגיע SYS_STATUS טרי אחרי האישור",
+}
+DIAG_RESULT_HE = {
+    "TEMPORARILY_REJECTED": "בקר הטיסה דחה זמנית (למשל כי הוא חמוש)",
+    "UNSUPPORTED": "הקושחה לא תומכת בפקודה",
+    "DENIED": "בקר הטיסה סירב",
+    "FAILED": "בקר הטיסה דיווח כישלון בביצוע",
+}
+DIAG_LIMIT = ("האבחון הוא MAV_CMD_RUN_PREARM_CHECKS (קריאה בלבד): ArduPilot מריץ את בדיקות ה-Pre-arm ושולח הודעות PreArm "
+              "על כל כשל. אישור (ACCEPTED) פירושו רק שהבדיקות הורצו - לא שעברו. ההחלטה מבוססת על ביט PREARM_CHECK "
+              "ב-SYS_STATUS שהגיע אחרי האישור ועל הודעות PreArm. האפליקציה לעולם לא מנסה לחמש כדי לבדוק מוכנות.")
+
+
+def _prearm_diag(ctx, cfg):
+    """Return (diag dict | None, age_s | None) for the explicit pre-arm diagnostic."""
+    o = ctx.snap.get("mav.prearm_diag")
+    if o is None or not isinstance(o.value, dict):
+        return None, None
+    age = ctx.snap.now_mono - o.t_mono
+    if age > float(cfg.get("diagnostic_max_age_s", 300)):
+        return None, age
+    return o.value, age
+
+
+def _diag_text(diag):
+    st = diag.get("state")
+    if st == "not_sent":
+        return "האבחון לא נשלח: " + {
+            "vehicle armed": "הרחפן חמוש",
+            "passive mode (requests disabled)": "מצב פסיבי (בקשות כבויות בהגדרות)",
+        }.get(diag.get("reason", ""), "אין HEARTBEAT טרי מהרחפן, לכן לא אומת שהוא לא חמוש")
+    if st == "rejected":
+        name = diag.get("result_name", "?")
+        return f"ArduPilot ענה {ltr(name)}: " + DIAG_RESULT_HE.get(name, "הבקשה לא בוצעה")
+    if st == "complete":
+        return "האבחון הושלם"
+    return DIAG_STATE_HE.get(st, f"מצב לא מוכר: {ltr(st)}")
+
+
 @check("fc.prearm", "fc", "מצב Pre-arm של ArduPilot")
 def fc_prearm(ctx, cfg):
     ss, age = _sys_status(ctx, cfg)
-    src = ctx.src("MAVLink SYS_STATUS (PREARM_CHECK) + STATUSTEXT")
+    src = ctx.src("MAVLink SYS_STATUS (PREARM_CHECK) + STATUSTEXT + MAV_CMD_RUN_PREARM_CHECKS")
     sens = P.sensors(ss)
     if sens is None:
         raise Unavailable(R(Status.UNKNOWN, "שדות החיישנים ב-SYS_STATUS אינם תקינים.", source=src, age_s=age))
     pa = sens["prearm_check"]
     texts = _recent_prearm(ctx)
-    ev = {"prearm_bit": pa, "recent_prearm_messages": texts}
+    require = bool(cfg.get("require_diagnostic", False))
+    diag, diag_age = _prearm_diag(ctx, cfg)
+    diag_texts = list((diag or {}).get("texts") or []) if (diag or {}).get("state") in ("accepted", "complete") else []
+    all_texts = list(dict.fromkeys(diag_texts + texts))
+    ev = {"prearm_bit": pa, "recent_prearm_messages": texts, "require_diagnostic": require,
+          "diagnostic": diag, "diagnostic_age_s": None if diag_age is None else round(diag_age, 1)}
+    limits = NO_PREARM_TEXT + " " + DIAG_LIMIT
     kind, value, _ = _arming_param(ctx)
     if kind is not None and "ALL" in _skipped_checks(kind, value):
         return R(Status.UNKNOWN, "בדיקות החימוש מושבתות, לכן ביט ה-Pre-arm אינו מעיד על דבר.",
                  observed=f"{ltr(kind)}={ltr(value)}", expected="בדיקות מופעלות ו-Pre-arm תקין",
-                 source=src, age_s=age, limitations=NO_PREARM_TEXT, evidence=ev)
+                 source=src, age_s=age, limitations=limits, evidence=ev)
     if not pa["present"]:
         return R(Status.UNKNOWN, "הקושחה אינה מדווחת מצב Pre-arm ב-SYS_STATUS. היעדר הודעות PreArm אינו הוכחה.",
                  observed="PREARM_CHECK לא מדווח", expected="PREARM_CHECK תקין", source=src, age_s=age,
-                 limitations=NO_PREARM_TEXT, evidence=ev)
+                 limitations=limits, evidence=ev)
     if not pa["enabled"]:
         return R(Status.UNKNOWN, "ArduPilot מדווח שבדיקות ה-Pre-arm אינן מופעלות (enabled=0), לכן אין משמעות למצב התקינות.",
                  observed="PREARM_CHECK: לא מופעל", expected="PREARM_CHECK מופעל ותקין", source=src, age_s=age,
-                 limitations=NO_PREARM_TEXT, evidence=ev)
-    if pa["healthy"]:
-        expl = "ArduPilot מדווח שבדיקות ה-Pre-arm עוברות."
-        if kind is None:
-            expl += " (לא נקרא ARMING_CHECK - לא ידוע אם חלק מהבדיקות מושבתות.)"
-        return R(Status.PASS, expl, observed="PREARM_CHECK: תקין", expected="PREARM_CHECK תקין",
-                 source=src, age_s=age, limitations=NO_PREARM_TEXT, evidence=ev)
-    observed = "PREARM_CHECK: נכשל"
-    if texts:
-        observed += " · " + " | ".join(ltr(t) for t in texts[:4])
-    expl = "ArduPilot מדווח שבדיקות Pre-arm נכשלות."
-    if not texts:
-        expl += " טרם התקבלה הודעת PreArm עם הסיבה (ArduPilot שולח אותן מדי פעם; ראה Mission Planner)."
-    return R(Status.FAIL, expl, observed=observed, expected="PREARM_CHECK תקין", source=src, age_s=age,
-             limitations=NO_PREARM_TEXT, evidence=ev)
+                 limitations=limits, evidence=ev)
+    diag_bit = (diag or {}).get("prearm_bit") if (diag or {}).get("state") == "complete" else None
+    diag_failed = isinstance(diag_bit, dict) and diag_bit.get("present") and diag_bit.get("enabled") \
+        and not diag_bit.get("healthy")
+    if not pa["healthy"] or diag_failed or diag_texts:
+        observed = "PREARM_CHECK: " + ("נכשל" if not pa["healthy"] or diag_failed else "תקין")
+        if all_texts:
+            observed += " · " + " | ".join(ltr(t) for t in all_texts[:4])
+        if pa["healthy"] and not diag_failed:
+            expl = "באבחון שהורץ ArduPilot שלח הודעות כשל PreArm."
+        else:
+            expl = "ArduPilot מדווח שבדיקות Pre-arm נכשלות."
+        if not all_texts:
+            expl += " טרם התקבלה הודעת PreArm עם הסיבה. לחץ 'הרץ בדיקה' כדי לבקש אבחון (או ראה Mission Planner)."
+        return R(Status.FAIL, expl, observed=observed, expected="PREARM_CHECK תקין, ללא הודעות PreArm",
+                 source=src, age_s=age, limitations=limits, evidence=ev)
+    # Bit healthy and no failure text.
+    note = " (לא נקרא ARMING_CHECK - לא ידוע אם חלק מהבדיקות מושבתות.)" if kind is None else ""
+    if diag is not None and diag.get("state") == "complete":
+        if not (isinstance(diag_bit, dict) and diag_bit.get("present") and diag_bit.get("enabled")):
+            return R(Status.UNKNOWN, "האבחון הושלם, אבל ה-SYS_STATUS שאחריו לא דיווח ביט Pre-arm מופעל.",
+                     observed="אבחון: ביט PREARM_CHECK חסר", expected="PREARM_CHECK מופעל ותקין",
+                     source=src, age_s=age, limitations=limits, evidence=ev)
+        return R(Status.PASS, "ArduPilot הריץ את בדיקות ה-Pre-arm לפי בקשה ומדווח שהן עוברות, בלי הודעות כשל." + note,
+                 observed=f"PREARM_CHECK: תקין · אבחון הושלם (ACK {ltr(diag.get('result_name', ''))})",
+                 expected="PREARM_CHECK תקין", source=src, age_s=age, limitations=limits, evidence=ev)
+    if require:
+        if diag is None:
+            why = "האבחון עוד לא הורץ (או שהתוצאה ישנה). לחץ 'הרץ בדיקה' כשהרחפן לא חמוש."
+            obs = "PREARM_CHECK: תקין · אבחון: לא הורץ"
+        else:
+            why = _diag_text(diag) + "."
+            obs = f"PREARM_CHECK: תקין · אבחון: {ltr(diag.get('state', '?'))}"
+        return R(Status.UNKNOWN, "הפרופיל דורש אבחון Pre-arm מפורש. " + why,
+                 observed=obs, expected="אבחון הושלם + PREARM_CHECK תקין", source=src, age_s=age,
+                 limitations=limits, evidence=ev)
+    expl = "ArduPilot מדווח שבדיקות ה-Pre-arm עוברות." + note
+    if diag is not None:
+        expl += f" (אבחון מפורש: {_diag_text(diag)}.)"
+    return R(Status.PASS, expl, observed="PREARM_CHECK: תקין", expected="PREARM_CHECK תקין",
+             source=src, age_s=age, limitations=limits, evidence=ev)
 
 
 _SEPARATE = {"prearm_check", "logging", "battery"}
@@ -281,6 +368,30 @@ def fc_logging(ctx, cfg):
                  expected="רישום פעיל ותקין", source=src, age_s=age, evidence=ev)
     return R(Status.PASS, "ArduPilot מדווח שהרישום תקין.", observed=observed, expected="רישום פעיל ותקין",
              source=src, age_s=age, evidence=ev)
+
+
+@check("fc.load", "fc", "עומס מעבד ושגיאות תקשורת בבקר הטיסה")
+def fc_load(ctx, cfg):
+    ss, age = _sys_status(ctx, cfg)
+    src = ctx.src("MAVLink SYS_STATUS.load / errors_comm")
+    load = num(ss.get("load"))
+    errs = num(ss.get("errors_comm"))
+    if load is None:
+        raise Unavailable(R(Status.UNKNOWN, "שדה load לא תקין.", source=src, age_s=age))
+    pct = load / 10.0  # SYS_STATUS.load is in d% (0..1000)
+    warn, fail = num(cfg.get("warn_pct")), num(cfg.get("fail_pct"))
+    observed = f"{pct:.1f}%" + (f" · errors_comm={int(errs)}" if errs is not None else "")
+    expected = f"< {warn:g}% / < {fail:g}%" if warn is not None and fail is not None else "לא מוגדר"
+    if warn is None and fail is None:
+        return R(Status.UNKNOWN, "לא הוגדרו ספים.", observed=observed, source=src, age_s=age, configured=False)
+    if fail is not None and pct >= fail:
+        return R(Status.FAIL, "עומס מעבד קריטי בבקר הטיסה.", observed=observed, expected=expected, source=src, age_s=age)
+    if warn is not None and pct >= warn:
+        return R(Status.WARN, "עומס מעבד גבוה בבקר הטיסה.", observed=observed, expected=expected, source=src, age_s=age)
+    if errs:
+        return R(Status.WARN, "העומס תקין, אבל יש שגיאות תקשורת שדווחו (errors_comm).", observed=observed,
+                 expected=expected + " · errors_comm=0", source=src, age_s=age)
+    return R(Status.PASS, "העומס בבקר הטיסה תקין.", observed=observed, expected=expected, source=src, age_s=age)
 
 
 def _gps(ctx, cfg):

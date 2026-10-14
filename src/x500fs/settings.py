@@ -61,51 +61,100 @@ class MavlinkSettings:
     target_sysid: int = 0           # 0 = first autopilot heartbeat seen
     request_messages: bool = True
     request_interval_s: float = 2.0
+    # On "run preflight" only, while verified disarmed: send MAV_CMD_RUN_PREARM_CHECKS
+    # (read-only; ArduPilot reports failures as PreArm STATUSTEXT). Never an arm attempt.
+    prearm_diagnostic: bool = True
+
+
+# Requested encoder settings of the existing Pi pipeline (copied from
+# /opt/x500/bin/x500-video-run in the 2026-10-14 source snapshot). These are what
+# the Pi is ASKED to produce - not measured performance, and the SRT latency is a
+# configured buffer, not an end-to-end delay.
+SRT_PROFILES = {
+    "high": {"width": 640, "height": 480, "fps": 60, "bitrate_kbps": 1200, "latency_us": 120000},
+    "normal": {"width": 640, "height": 480, "fps": 30, "bitrate_kbps": 650, "latency_us": 180000},
+    "degraded": {"width": 480, "height": 360, "fps": 20, "bitrate_kbps": 350, "latency_us": 300000},
+}
 
 
 @dataclass
 class VideoSettings:
+    backend: str = "srt"            # srt (existing Pi pipeline, default) | rtsp (MediaMTX alternative)
+    # --- SRT: x500-video@<profile>.service on the Pi, listener on its Tailscale IPv4 ---
+    srt_profile: str = "degraded"   # start with the lowest-load existing profile
+    srt_profiles: dict = field(default_factory=lambda: {k: dict(v) for k, v in SRT_PROFILES.items()})
+    srt_host: str = ""              # empty = the Pi's Tailscale IPv4 as reported by the collector
+    srt_port: int = 5600
+    srt_extra_params: str = ""      # appended to the SRT URL (advanced)
+    manage_pi_service: bool = True  # explicit start/stop of x500-video@<profile> via `sudo -n systemctl`
+    stop_pi_service_on_stop: bool = True
+    unit_template: str = "x500-video@{profile}.service"
+    progress_template: str = "/run/x500-video-{profile}.progress"
+    pi_config_file: str = "/etc/x500/video.conf"
+    service_start_wait_s: float = 4.0
+    ffmpeg_path: str = ""           # empty = FFmpeg bundled with the app (imageio-ffmpeg)
+    # --- RTSP / MediaMTX alternative (not the default) ---
     transport: str = "ssh_tunnel"   # ssh_tunnel | direct
     rtsp_port: int = 8554
     path: str = "x500cam"
-    direct_url: str = ""            # optional full override, e.g. rtsp://100.x.y.z:8554/x500cam
-    rtsp_transport: str = "tcp"     # tcp | udp
+    direct_url: str = ""
+    rtsp_transport: str = "tcp"
     width: int = 640
     height: int = 480
     fps: int = 15
     bitrate_kbps: int = 1000
     apply_camera_settings: bool = True
+    mediamtx_api: str = "http://127.0.0.1:9997"
+    # --- common ---
     max_reconnects: int = 5
     stale_after_s: float = 2.0
-    # MediaMTX starts an on-demand camera source when the first reader arrives and
-    # may wait up to sourceOnDemandStartTimeout (10 s) before answering.
     open_timeout_s: float = 12.0
-    mediamtx_api: str = "http://127.0.0.1:9997"
+
+    def profile(self) -> dict:
+        p = self.srt_profiles.get(self.srt_profile) or SRT_PROFILES.get(self.srt_profile) or SRT_PROFILES["degraded"]
+        return dict(p)
 
 
 @dataclass
 class PiSettings:
+    # Unit names from the X500 source snapshot. The hardware watchdog is systemd's
+    # own (RuntimeWatchdogSec), so there is no separate watchdog unit.
     services: dict = field(default_factory=lambda: {
-        "mavlink_router": "mavlink-router", "watchdog": "", "blackbox": "", "mediamtx": "",
+        "mavlink_router": "mavlink-router",
+        "blackbox": "x500-blackbox",
+        "health_monitor": "x500-health-monitor",
+        "net_monitor": "x500-net-monitor",
+        "tailscale": "tailscaled",
+        "mediamtx": "",
     })
-    blackbox_globs: list = field(default_factory=list)
-    collector_mode: str = "stream"  # stream (nothing installed) | installed
+    blackbox_globs: list = field(default_factory=lambda: ["/var/log/x500/blackbox/x500-blackbox-*.csv"])
+    blackbox_sleep_s: float = 10.0          # sleep in x500-blackbox; real cadence = probe time + sleep
+    watchdog_expected_runtime: str = "15s"  # from 60-x500-watchdog.conf; empty = any non-zero value
+    collector_mode: str = "stream"          # stream (nothing installed) | installed
     installed_collector_path: str = "/usr/local/bin/x500fs-collector"
-    python: str = "python3"
-    poll_interval_s: float = 10.0
+    python: str = "python3"                 # interpreter used to run the collector on the Pi
+    legacy_python: str = ""                 # Pi venv with pymavlink (account-specific; for pi/x500 tools)
+    poll_interval_s: float = 10.0           # fast cycle
+    slow_poll_interval_s: float = 60.0      # pings, camera enumeration, Tailscale, USB
     collector_timeout_s: float = 45.0
-    ping_target: str = ""
+    wifi_interface: str = "wlan0"
+    lte_interface: str = "eth1"
+    tailscale_interface: str = "tailscale0"
+    zte_gateway: str = ""                   # modem gateway address (was hardcoded in the old scripts)
+    ground_ip: str = ""                     # ground station address for the Pi-side reachability probe
+    ping_target: str = "1.1.1.1"            # Internet probe target used by the old scripts
     lte_usb_vids: list = field(default_factory=lambda: ["19d2"])
-    lte_interface: str = ""
+    fc_byid_glob: str = "usb-Holybro_Pixhawk6C_*-if00"
+    expected_fc_byid: str = ""              # exact /dev/serial/by-id name to verify (optional)
     camera_probe: bool = True
-    # Existing scripts on the Pi, e.g. {"name": "x500-status", "command": "x500-status",
+    # Existing scripts on the Pi, e.g. {"name": "x500-health", "command": "x500-health --json",
     # "timeout_s": 20, "enabled": false}. Disabled until you enable them.
     tools: list = field(default_factory=list)
 
 
 @dataclass
 class Settings:
-    schema_version: int = 1
+    schema_version: int = 2
     drone_name: str = "X500"
     simulation: bool = False
     sim_scenario: str = "healthy"
@@ -160,7 +209,12 @@ def _fill(cls, d: Any):
         elif isinstance(cur, dict):
             if isinstance(val, dict):
                 merged = dict(cur)
-                merged.update({str(k): v for k, v in val.items() if isinstance(v, str)})
+                for k, v in val.items():
+                    default = cur.get(str(k))
+                    if default is None and isinstance(v, (str, dict)):
+                        merged[str(k)] = v
+                    elif isinstance(v, type(default)) and not isinstance(v, bool):
+                        merged[str(k)] = v
                 setattr(obj, f.name, merged)
         elif isinstance(cur, list):
             if isinstance(val, list):

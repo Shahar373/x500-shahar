@@ -7,6 +7,7 @@ nothing is installed or changed on the Pi.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import shlex
@@ -17,6 +18,7 @@ from typing import Callable
 from ..core.observations import ObservationStore
 from ..core.session import SessionLog
 from ..pi_side import script_source
+from ..pi_side import x500fs_collector as collector_mod
 from .ssh import AuthFailed, HostKeyMismatch, HostKeyUnknown, KnownHosts, SshAuth, SshError, SshSession
 
 log = logging.getLogger(__name__)
@@ -146,23 +148,48 @@ def collector_config(pi_settings, video_settings) -> dict:
         tools.append({"name": t.get("name") or t["command"].split()[0],
                       "argv": shlex.split(t["command"]),
                       "timeout_s": float(t.get("timeout_s") or 20)})
+    services = {k: v for k, v in (pi_settings.services or {}).items() if v}
     return {
-        "services": {k: v for k, v in (pi_settings.services or {}).items() if v},
+        "services": services,
         "blackbox_globs": list(pi_settings.blackbox_globs or []),
         "lte_usb_vids": list(pi_settings.lte_usb_vids or []),
+        "wifi_interface": pi_settings.wifi_interface or "",
         "lte_interface": pi_settings.lte_interface or "",
+        "tailscale_interface": pi_settings.tailscale_interface or "",
+        "zte_gateway": pi_settings.zte_gateway or "",
+        "ground_ip": pi_settings.ground_ip or "",
         "ping_target": pi_settings.ping_target or "",
+        "fc_byid_glob": pi_settings.fc_byid_glob or "",
         "tools": tools,
         "mediamtx": {"api": video_settings.mediamtx_api, "path": video_settings.path},
         "camera_probe": bool(pi_settings.camera_probe),
+        "video": {
+            "profiles": list(video_settings.srt_profiles.keys()) or ["high", "normal", "degraded"],
+            "unit_template": video_settings.unit_template,
+            "progress_template": video_settings.progress_template,
+            "config_file": video_settings.pi_config_file,
+        },
     }
 
 
-def collector_command(pi_settings, cfg: dict) -> tuple[str, bytes | None]:
+def sections_for(pi_settings, video_settings, slow: bool) -> list[str]:
+    """Bounded cadence: cheap sections every cycle, slow probes only when due."""
+    names = list(collector_mod.FAST_SECTIONS)
+    if slow:
+        names += [n for n in collector_mod.SLOW_SECTIONS if n not in ("mediamtx", "tools")]
+        if video_settings.backend == "rtsp":
+            names.append("mediamtx")
+        if any(isinstance(t, dict) and t.get("enabled") for t in pi_settings.tools or []):
+            names.append("tools")
+    return names
+
+
+def collector_command(pi_settings, cfg: dict, only: list[str] | None = None) -> tuple[str, bytes | None]:
     b64 = base64.b64encode(json.dumps(cfg, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    only_arg = f" --only {shlex.quote(','.join(only))}" if only else ""
     if pi_settings.collector_mode == "installed":
-        return f"{shlex.quote(pi_settings.installed_collector_path)} --config-b64 {b64}", None
-    return (f"{shlex.quote(pi_settings.python)} -I - --config-b64 {b64}",
+        return f"{shlex.quote(pi_settings.installed_collector_path)} --config-b64 {b64}{only_arg}", None
+    return (f"{shlex.quote(pi_settings.python)} -I - --config-b64 {b64}{only_arg}",
             script_source("x500fs_collector.py"))
 
 
@@ -196,6 +223,8 @@ class PiPoller:
         self._thread: threading.Thread | None = None
         self.last_ok_mono: float | None = None
         self.busy = False
+        self._force_slow = False
+        self._last_video = None
 
     def start(self) -> None:
         self._stop.clear()
@@ -209,35 +238,58 @@ class PiPoller:
             self._thread.join(timeout)
 
     def refresh(self) -> None:
+        """Run a full collection (fast + slow sections) as soon as possible."""
+        self._force_slow = True
         self._refresh.set()
 
     def _put(self, key, value):
         self.store.put(key, value, "Pi collector", simulated=False)
 
     def _run(self) -> None:
+        merged: dict = {"schema": COLLECTOR_SCHEMA, "sections": {}}
+        next_slow = 0.0
         while not self._stop.is_set():
             pi_s, video_s = self.settings_provider()
             self._put("pi.poll_interval_s", pi_s.poll_interval_s)
+            self._put("pi.slow_poll_interval_s", pi_s.slow_poll_interval_s)
             try:
                 ssh = self.ssh.wait_session(timeout=1.0)
             except SshError:
                 self._refresh.wait(1.0)
                 self._refresh.clear()
                 continue
+            forced = self._force_slow
+            self._force_slow = False
+            slow = forced or time.monotonic() >= next_slow
+            only = sections_for(pi_s, video_s, slow)
             self.busy = True
             try:
-                cmd, stdin = collector_command(pi_s, collector_config(pi_s, video_s))
+                cmd, stdin = collector_command(pi_s, collector_config(pi_s, video_s), only)
                 res = ssh.exec(cmd, stdin=stdin, timeout=pi_s.collector_timeout_s, cancel=self._stop)
                 if res.exit_code != 0:
                     err = res.stderr.decode("utf-8", "replace").strip()[-300:]
                     raise RuntimeError(f"collector exit {res.exit_code}: {err or 'no stderr'}")
                 doc = parse_collector_output(res.stdout)
-                doc["_transport"] = {"command_duration_ms": int(res.duration_s * 1000)}
-                self._put("pi.collector", doc)
+                received = time.monotonic()
+                slow_set = set(collector_mod.SLOW_SECTIONS)
+                for name, sec in doc["sections"].items():
+                    if isinstance(sec, dict):
+                        sec["_received_mono"] = received
+                        sec["_cadence"] = "slow" if name in slow_set else "fast"
+                        sec["_pi_epoch"] = doc.get("generated_at_epoch")
+                        merged["sections"][name] = sec
+                self._video_rate(doc, merged)
+                for k in ("collector_version", "generated_at_epoch", "pi_monotonic_s", "duration_ms"):
+                    merged[k] = doc.get(k)
+                merged["_transport"] = {"command_duration_ms": int(res.duration_s * 1000),
+                                        "laptop_epoch_at_receipt": time.time(), "sections": only}
+                if slow:
+                    next_slow = time.monotonic() + pi_s.slow_poll_interval_s
+                self._put("pi.collector", copy.deepcopy(merged))
                 self.store.remove_prefix("pi.collector_error")
                 self.last_ok_mono = time.monotonic()
                 self.session.link_up("collector")
-                self._track_boot(doc)
+                self._track_boot(merged)
             except Exception as e:  # noqa: BLE001
                 msg = f"{type(e).__name__}: {e}"
                 self._put("pi.collector_error", msg[:300])
@@ -246,6 +298,22 @@ class PiPoller:
                 self.busy = False
             self._refresh.wait(pi_s.poll_interval_s)
             self._refresh.clear()
+
+    def _video_rate(self, doc: dict, merged: dict) -> None:
+        """Encoder frame rate between two collector samples (Pi clock on both ends)."""
+        try:
+            sec = doc["sections"]["video"]
+            prog = sec["data"]["progress"]
+            frame = prog["parsed"]["frame"]
+            epoch = float(doc["generated_at_epoch"])
+            profile = sec["data"]["active_profile"]
+        except (KeyError, TypeError, ValueError):
+            self._last_video = None
+            return
+        prev = self._last_video
+        self._last_video = (profile, frame, epoch)
+        if prev and prev[0] == profile and isinstance(frame, int) and isinstance(prev[1], int) and epoch > prev[2]:
+            prog["frame_rate_between_polls"] = round((frame - prev[1]) / (epoch - prev[2]), 2)
 
     def _track_boot(self, doc: dict) -> None:
         try:

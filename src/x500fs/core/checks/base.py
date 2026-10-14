@@ -42,6 +42,14 @@ class DroneConfig:
     mav_target_sysid: int = 0          # 0 = auto-detect
     video_active: bool = False
     pinned_hostkey: str | None = None  # fingerprint actually verified this session
+    watchdog_expected_runtime: str = ""  # e.g. "15s" (systemd RuntimeWatchdogUSec text)
+    blackbox_sleep_s: float = 10.0
+    expected_fc_byid: str = ""
+    video_backend: str = "srt"
+    srt_profile: str = "degraded"
+    ping_target_configured: bool = False
+    zte_gateway_configured: bool = False
+    ground_ip_configured: bool = False
 
 
 @dataclass
@@ -199,10 +207,14 @@ class Ctx:
             return None
         return o.value, o.age(self.snap.now_mono)
 
-    def pi_max_age(self) -> float:
-        o = self.snap.get("pi.poll_interval_s")
-        interval = float(o.value) if o and isinstance(o.value, (int, float)) else 10.0
-        return max(30.0, interval * 3.5)
+    def _interval(self, key: str, default: float) -> float:
+        o = self.snap.get(key)
+        return float(o.value) if o and isinstance(o.value, (int, float)) and not isinstance(o.value, bool) else default
+
+    def pi_max_age(self, cadence: str = "fast") -> float:
+        if cadence == "slow":
+            return max(180.0, self._interval("pi.slow_poll_interval_s", 60.0) * 3.5)
+        return max(30.0, self._interval("pi.poll_interval_s", 10.0) * 3.5)
 
     def require_section(self, name: str) -> tuple[Any, float]:
         src = self.src(f"Pi collector · {name}")
@@ -216,20 +228,24 @@ class Ctx:
                 source=src, missing=("pi.collector",),
             ))
         doc, age = got
-        if age > self.pi_max_age():
-            raise Unavailable(R(
-                Status.UNKNOWN,
-                f"נתוני ה-Pi ישנים ({fmt_age(age)}). נתון ישן אינו נחשב תקין.",
-                source=src, age_s=age, missing=("pi.collector (stale)",),
-            ))
         sections = doc.get("sections")
         if not isinstance(sections, dict) or name not in sections:
             raise Unavailable(R(
                 Status.UNKNOWN,
-                f"הסעיף {ltr(name)} חסר בפלט ה-collector (גרסה לא תואמת?).",
+                f"הסעיף {ltr(name)} עוד לא התקבל מה-collector (נאסף במחזור האיטי, או גרסה לא תואמת).",
                 source=src, age_s=age, missing=(f"collector.{name}",),
             ))
         sec = sections[name]
+        if isinstance(sec, dict) and isinstance(sec.get("_received_mono"), (int, float)):
+            # Each section carries its own receive time (fast and slow sections differ).
+            age = max(0.0, self.snap.now_mono - float(sec["_received_mono"]))
+        cadence = sec.get("_cadence", "fast") if isinstance(sec, dict) else "fast"
+        if age > self.pi_max_age(cadence):
+            raise Unavailable(R(
+                Status.UNKNOWN,
+                f"נתוני ה-Pi ({ltr(name)}) ישנים ({fmt_age(age)}). נתון ישן אינו נחשב תקין.",
+                source=src, age_s=age, missing=(f"collector.{name} (stale)",),
+            ))
         if not isinstance(sec, dict) or not sec.get("ok"):
             err = sec.get("error") if isinstance(sec, dict) else "malformed"
             raise Unavailable(R(

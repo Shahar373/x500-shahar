@@ -47,9 +47,9 @@ def batt_voltage(ctx, cfg):
     observed = f"{v:.2f} V"
     if cells:
         observed += f" ({v / cells:.2f} V/תא)"
-    if v < 0.5:
-        return R(Status.UNKNOWN, "המתח קרוב ל-0 - ככל הנראה סוללה לא מחוברת (למשל הזנה מ-USB בלבד) או בעיית חיישן.",
-                 observed=observed, expected="מתח סוללה תקין", source=src, age_s=age)
+    if v < 5.0:
+        return R(Status.UNKNOWN, "המתח מתחת ל-5V - זו לא קריאה של סוללת טיסה (למשל הזנה מ-USB בלבד, או חיישן לא מכויל).",
+                 observed=observed, expected="קריאת סוללת טיסה תקפה", source=src, age_s=age)
     warn, wdesc = ctx.resolve_threshold(cfg.get("warn_v"))
     fail, fdesc = ctx.resolve_threshold(cfg.get("fail_v"))
     # ArduPilot uses 0 to mean "disabled" for BATT_LOW_VOLT / BATT_CRT_VOLT.
@@ -82,7 +82,8 @@ def batt_voltage(ctx, cfg):
                  observed=observed, expected=expected, source=src, age_s=age, configured=False, evidence=ev)
     return R(Status.PASS, "המתח מעל הספים המוגדרים.", observed=observed, expected=expected, source=src,
              age_s=age, evidence=ev,
-             limitations="מתח במנוחה אינו מעיד על קיבולת או על מצב הסוללה תחת עומס.")
+             limitations="מתח במנוחה אינו מעיד על קיבולת או על מצב הסוללה תחת עומס. הקריאה תלויה בכיול מד הסוללה "
+                         "(BATT_VOLT_MULT) - ראו 'כיול מד הסוללה מול פרופיל צפוי'.")
 
 
 @check("batt.monitor", "battery", "הגדרת מד הסוללה (BATT_MONITOR)")
@@ -184,6 +185,11 @@ def _param_group(ctx, group: str, title: str):
     return R(Status.PASS, f"ערכי {title} תואמים לפרופיל הצפוי.", observed=observed, expected=expected,
              source=src, age_s=age, evidence=ev,
              limitations="השוואה לקריאה בלבד. האפליקציה אינה משנה פרמטרים.")
+
+
+@check("cfg.battery_monitor", "battery", "כיול מד הסוללה מול פרופיל צפוי")
+def cfg_battery_monitor(ctx, cfg):
+    return _param_group(ctx, "battery_monitor", "מד הסוללה (BATT_MONITOR/VOLT_MULT/AMP_PERVLT/CAPACITY)")
 
 
 @check("cfg.failsafe", "battery", "הגדרות Failsafe מול פרופיל צפוי")

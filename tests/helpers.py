@@ -11,15 +11,15 @@ from x500fs.core.session import SessionLog
 from x500fs.core.status import aggregate
 from x500fs.sim.simulator import SIM_PARAMS, make_collector_doc
 
-SERVICES = {"mavlink_router": "mavlink-router", "watchdog": "x500-watchdog.service",
-            "blackbox": "x500-blackbox.service"}
+SERVICES = {"mavlink_router": "mavlink-router", "blackbox": "x500-blackbox",
+            "health_monitor": "x500-health-monitor", "net_monitor": "x500-net-monitor", "tailscale": "tailscaled"}
 
 SENSORS_OK = 0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x200000 | 0x1000000 | 0x2000000 | 0x10000000
 
 
 def drone(**kw) -> DroneConfig:
     d = dict(expected_hostname="x500pi", link_path="wifi", services=dict(SERVICES),
-             blackbox_globs=["/var/log/x500/*.log"])
+             blackbox_globs=["/var/log/x500/blackbox/x500-blackbox-*.csv"], watchdog_expected_runtime="15s")
     d.update(kw)
     return DroneConfig(**d)
 
@@ -30,7 +30,8 @@ def msgs_healthy() -> dict[str, dict]:
                       "custom_mode": 0, "system_status": 3, "mavlink_version": 3},
         "SYS_STATUS": {"mavpackettype": "SYS_STATUS", "onboard_control_sensors_present": SENSORS_OK,
                        "onboard_control_sensors_enabled": SENSORS_OK, "onboard_control_sensors_health": SENSORS_OK,
-                       "voltage_battery": 16400, "current_battery": 90, "battery_remaining": 97},
+                       "voltage_battery": 16400, "current_battery": 90, "battery_remaining": 97,
+                       "load": 250, "errors_comm": 0},
         "GPS_RAW_INT": {"mavpackettype": "GPS_RAW_INT", "fix_type": 3, "satellites_visible": 14, "eph": 80,
                         "epv": 120, "h_acc": 900},
         "EKF_STATUS_REPORT": {"mavpackettype": "EKF_STATUS_REPORT", "flags": 1 | 2 | 4 | 8 | 16 | 32 | 512,
@@ -43,6 +44,13 @@ def msgs_healthy() -> dict[str, dict]:
                               "flight_sw_version": (4 << 24) | (7 << 16) | (2 << 8) | 255,
                               "flight_custom_version": list(b"51a7f3c1")},
     }
+
+
+def prearm_diag_complete(healthy=True, texts=None) -> dict:
+    """What MavlinkClient publishes after a successful RUN_PREARM_CHECKS round."""
+    return {"state": "complete", "finished": True, "result": 0, "result_name": "ACCEPTED", "ack_from": "1/1",
+            "texts": list(texts or []), "prearm_bit": {"present": True, "enabled": True, "healthy": healthy},
+            "sys_status_after_ack_s": 1.1}
 
 
 class World:
@@ -74,6 +82,7 @@ class World:
         self.put("pi.collector", make_collector_doc("healthy", link_path, 1000, "boot-1"), age)
         self.put("pi.boot_history", {"current_boot_id": "boot-1", "previous_boot_id": "boot-1",
                                      "boot_ids_this_session": ["boot-1"]})
+        self.put("mav.prearm_diag", prearm_diag_complete(), age)
         self.session.rtt.add(20)
         self.drone.link_path = link_path
         return self
@@ -95,6 +104,7 @@ def flight_complete_profile(cells=4, chem="LiPo") -> dict:
     doc = profile_mod.builtin_doc("flight")
     doc["battery"].update({"chemistry": chem, "cells": cells})
     doc["expected_params"] = {
+        "battery_monitor": {"BATT_MONITOR": {"eq": 4}, "BATT_CAPACITY": {"min": 3000}},
         "failsafe": {"FS_THR_ENABLE": {"eq": 1}, "BATT_FS_LOW_ACT": {"eq": 2}},
         "rtl": {"RTL_ALT": {"min": 1500, "max": 5000}},
         "fence": {"FENCE_ENABLE": {"eq": 1}},

@@ -126,6 +126,14 @@ class Controller:
             mav_target_sysid=s.mavlink.target_sysid,
             video_active=self._video is not None,
             pinned_hostkey=(ssh.value.get("fingerprint") if ssh else None),
+            watchdog_expected_runtime=s.pi.watchdog_expected_runtime,
+            blackbox_sleep_s=s.pi.blackbox_sleep_s,
+            expected_fc_byid=s.pi.expected_fc_byid,
+            video_backend=s.video.backend,
+            srt_profile=s.video.srt_profile,
+            ping_target_configured=bool(s.pi.ping_target),
+            zte_gateway_configured=bool(s.pi.zte_gateway),
+            ground_ip_configured=bool(s.pi.ground_ip),
         )
 
     # ------------------------------------------------------------------ connect
@@ -270,7 +278,7 @@ class Controller:
         self.preflight_started = time.time()
         self.session.event("info", "app", "התחיל סשן בדיקה חדש - הרשימה הידנית אופסה")
         if self._sim:
-            self._sim.request_refresh()
+            self._sim.request_refresh(prearm_diagnostic=self.settings.mavlink.prearm_diagnostic)
         if self._poller:
             self._poller.refresh()
         if self._mav:
@@ -278,6 +286,8 @@ class Controller:
             for group in (self.profile.expected_params or {}).values():
                 extra.extend(group.keys())
             self._mav.refresh(all_params(extra))
+            if self.settings.mavlink.prearm_diagnostic:
+                self._mav.request_prearm_diagnostic()
 
     def preflight_progress(self) -> dict:
         """What has been refreshed since 'run preflight' was pressed."""

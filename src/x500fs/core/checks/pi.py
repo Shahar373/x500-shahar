@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ..status import Status
 from .base import R, Unavailable, check, fmt_age, ltr, num
 
@@ -123,24 +125,31 @@ def pi_uptime(ctx, cfg):
 @check("pi.temperature", "pi", "טמפרטורת מעבד ה-Pi")
 def pi_temperature(ctx, cfg):
     data, age = ctx.require_section("thermal")
+    src_kind = data.get("cpu_temp_source")
+    src = ctx.src("Pi collector · " + ({"thermal_zone": "/sys/class/thermal", "vcgencmd": "vcgencmd measure_temp"}
+                                      .get(src_kind, "thermal_zone / vcgencmd")))
     t = num(data.get("cpu_temp_c"))
-    src = ctx.src("Pi collector · /sys/class/thermal")
+    ev = {k: data.get(k) for k in ("zone_temp_c", "vcgencmd_temp_c", "vcgencmd_error", "cpu_temp_source")}
     if t is None:
-        raise Unavailable(R(Status.UNKNOWN, "הטמפרטורה לא דווחה.", source=src, age_s=age))
+        raise Unavailable(R(Status.UNKNOWN, "הטמפרטורה לא זמינה משום מקור (גם לא vcgencmd). לא מוצג 0.",
+                            source=src, age_s=age, evidence=ev, missing=("cpu temperature",)))
     warn, fail, wd, fd = _thresholds(ctx, cfg, "warn_c", "fail_c")
     observed = f"{t:.1f}°C"
+    other = num(data.get("vcgencmd_temp_c")) if src_kind == "thermal_zone" else None
+    if other is not None:
+        observed += f" (vcgencmd {other:.1f}°C)"
     expected = f"< {wd}°C (אזהרה), < {fd}°C (כישלון)"
     if warn is None and fail is None:
         return R(Status.UNKNOWN, "לא הוגדרו ספי טמפרטורה בפרופיל.", observed=observed, source=src,
-                 age_s=age, configured=False)
+                 age_s=age, configured=False, evidence=ev)
     if fail is not None and t >= fail:
-        return R(Status.FAIL, "טמפרטורה גבוהה - צפויה האטה של המעבד.", observed=observed,
-                 expected=expected, source=src, age_s=age)
+        return R(Status.FAIL, "טמפרטורה קריטית.", observed=observed,
+                 expected=expected, source=src, age_s=age, evidence=ev)
     if warn is not None and t >= warn:
-        return R(Status.WARN, "טמפרטורה קרובה לגבול ההאטה.", observed=observed, expected=expected,
-                 source=src, age_s=age)
+        return R(Status.WARN, "טמפרטורה גבוהה.", observed=observed, expected=expected,
+                 source=src, age_s=age, evidence=ev)
     return R(Status.PASS, "הטמפרטורה בטווח המוגדר.", observed=observed, expected=expected,
-             source=src, age_s=age)
+             source=src, age_s=age, evidence=ev)
 
 
 @check("pi.cpu", "pi", "עומס מעבד ה-Pi")
@@ -192,26 +201,33 @@ def pi_storage(ctx, cfg):
     if not isinstance(mounts, list) or not mounts:
         raise Unavailable(R(Status.UNKNOWN, "לא דווחו נתוני אחסון.", source=src, age_s=age))
     warn, fail, wd, fd = _thresholds(ctx, cfg, "warn_free_mb", "fail_free_mb")
-    worst = None
-    parts = []
+    warn_pct, fail_pct = num(cfg.get("warn_used_pct")), num(cfg.get("fail_used_pct"))
+    status, reasons, parts = Status.PASS, [], []
     for m in mounts:
-        free = num(m.get("free_mb"))
-        if free is None:
+        free, total = num(m.get("free_mb")), num(m.get("total_mb"))
+        if free is None or not total:
             continue
-        parts.append(f"{ltr(m.get('path'))}: {free / 1024:.1f} GB")
-        if worst is None or free < worst[0]:
-            worst = (free, m.get("path"))
-    if worst is None:
+        used = 100.0 * (1 - free / total)
+        parts.append(f"{ltr(m.get('path'))}: {free / 1024:.1f} GB פנוי ({used:.0f}% בשימוש)")
+        level = Status.PASS
+        if (fail is not None and free <= fail) or (fail_pct is not None and used >= fail_pct):
+            level = Status.FAIL
+        elif (warn is not None and free <= warn) or (warn_pct is not None and used >= warn_pct):
+            level = Status.WARN
+        if level is not Status.PASS:
+            reasons.append(ltr(m.get("path")))
+            if level is Status.FAIL or status is Status.PASS:
+                status = level
+    if not parts:
         raise Unavailable(R(Status.UNKNOWN, "נתוני האחסון אינם תקינים.", source=src, age_s=age))
     observed = ", ".join(parts)
-    expected = f"> {wd} MB / > {fd} MB"
-    if warn is None and fail is None:
+    expected = f"פנוי > {wd} MB / > {fd} MB; בשימוש < {warn_pct:g}% / < {fail_pct:g}%" if warn_pct and fail_pct \
+        else f"> {wd} MB / > {fd} MB"
+    if warn is None and fail is None and warn_pct is None and fail_pct is None:
         return R(Status.UNKNOWN, "לא הוגדרו ספים.", observed=observed, source=src, age_s=age, configured=False)
-    if fail is not None and worst[0] <= fail:
-        return R(Status.FAIL, f"מעט מאוד מקום פנוי ב-{ltr(worst[1])}.", observed=observed, expected=expected, source=src, age_s=age)
-    if warn is not None and worst[0] <= warn:
-        return R(Status.WARN, f"מקום פנוי נמוך ב-{ltr(worst[1])}.", observed=observed, expected=expected, source=src, age_s=age)
-    return R(Status.PASS, "יש מספיק מקום פנוי.", observed=observed, expected=expected, source=src, age_s=age)
+    expl = {Status.PASS: "יש מספיק מקום פנוי.", Status.WARN: "מקום פנוי נמוך ב-" + ", ".join(reasons) + ".",
+            Status.FAIL: "מעט מאוד מקום פנוי ב-" + ", ".join(reasons) + "."}[status]
+    return R(status, expl, observed=observed, expected=expected, source=src, age_s=age)
 
 
 def _throttled(ctx):
@@ -219,9 +235,14 @@ def _throttled(ctx):
     src = ctx.src("Pi collector · vcgencmd get_throttled")
     val = data.get("throttled")
     if isinstance(val, bool) or not isinstance(val, int):
-        alarm = data.get("hwmon_undervoltage_alarm")
-        return None, data, age, src, alarm
+        return None, data, age, src, data.get("hwmon_undervoltage_alarm")
     return val, data, age, src, None
+
+
+def _power_ev(data, val):
+    return {"throttled": val, "throttled_raw": data.get("throttled_raw"),
+            "decoded": data.get("throttled_decoded"), "vcgencmd_error": data.get("vcgencmd_error"),
+            "ext5v_v": data.get("ext5v_v"), "hwmon_undervoltage_alarm": data.get("hwmon_undervoltage_alarm")}
 
 
 @check("pi.power_now", "pi", "מתח ה-Pi כעת (undervoltage/throttling)")
@@ -229,47 +250,52 @@ def pi_power_now(ctx, cfg):
     val, data, age, src, alarm = _throttled(ctx)
     ext5v = num(data.get("ext5v_v"))
     extra = f" · EXT5V {ext5v:.2f}V" if ext5v is not None else ""
+    ev = _power_ev(data, val)
     if val is None:
-        if isinstance(alarm, int):
+        if isinstance(alarm, int) and not isinstance(alarm, bool):
             src = ctx.src("Pi collector · hwmon rpi_volt in0_lcrit_alarm")
             if alarm:
                 return R(Status.FAIL, "התראת מתח נמוך פעילה (hwmon).", observed=f"alarm={alarm}{extra}",
-                         expected="alarm=0", source=src, age_s=age, limitations=POWER_LIMITATION)
-            return R(Status.PASS, "אין התראת מתח נמוך פעילה (hwmon).", observed=f"alarm=0{extra}",
-                     expected="alarm=0", source=src, age_s=age, limitations=POWER_LIMITATION)
-        raise Unavailable(R(Status.UNKNOWN, "לא ניתן לקרוא את מצב המתח (vcgencmd לא זמין?).",
-                            source=src, age_s=age, limitations=POWER_LIMITATION,
-                            evidence={"error": data.get("vcgencmd_error")}))
+                         expected="alarm=0", source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
+            return R(Status.PASS, "אין התראת מתח נמוך פעילה לפי hwmon. דגלי vcgencmd לא היו זמינים: "
+                     + ltr(data.get("vcgencmd_error") or "?"), observed=f"alarm=0{extra}",
+                     expected="alarm=0", source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
+        raise Unavailable(R(Status.UNKNOWN, "לא ניתן לקרוא את דגלי המתח (vcgencmd נכשל: "
+                            + ltr(data.get("vcgencmd_error") or "?") + "). הערך לא מוחלף ב-0x0.",
+                            source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev,
+                            missing=("get_throttled",)))
     active = [txt for bit, txt in THROTTLE_NOW.items() if val & (1 << bit)]
     observed = f"{ltr(hex(val))}{extra}"
-    ev = {"throttled": val, "ext5v_v": ext5v}
     if val & 1:
         return R(Status.FAIL, "ה-Pi מדווח על מתח נמוך כעת.", observed=observed, expected="ביטים 0-3 כבויים",
                  source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
     if active:
         return R(Status.WARN, "פעיל כעת: " + ", ".join(active) + ".", observed=observed, expected="ביטים 0-3 כבויים",
                  source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
-    return R(Status.PASS, "אין מתח נמוך או האטה כרגע.", observed=observed, expected="ביטים 0-3 כבויים",
-             source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
+    return R(Status.PASS, "אין מתח נמוך או האטה כרגע (דגלים נוכחיים). דגלים היסטוריים נבדקים בנפרד.",
+             observed=observed, expected="ביטים 0-3 כבויים", source=src, age_s=age,
+             limitations=POWER_LIMITATION, evidence=ev)
 
 
 @check("pi.power_history", "pi", "אירועי מתח מאז האתחול")
 def pi_power_history(ctx, cfg):
     val, data, age, src, alarm = _throttled(ctx)
+    ev = _power_ev(data, val)
     if val is None:
-        raise Unavailable(R(Status.UNKNOWN, "היסטוריית המתח אינה זמינה (נדרש vcgencmd).",
-                            source=src, age_s=age, limitations=POWER_LIMITATION))
+        raise Unavailable(R(Status.UNKNOWN, "היסטוריית המתח אינה זמינה (vcgencmd נכשל: "
+                            + ltr(data.get("vcgencmd_error") or "?") + ").",
+                            source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev))
     hist = [txt for bit, txt in THROTTLE_HIST.items() if val & (1 << bit)]
     observed = ltr(hex(val))
     if val & (1 << 16):
         return R(Status.WARN, "מאז האתחול היה מתח נמוך לפחות פעם אחת: " + ", ".join(hist) + ".",
                  observed=observed, expected="ביטים 16-19 כבויים", source=src, age_s=age,
-                 limitations=POWER_LIMITATION)
+                 limitations=POWER_LIMITATION, evidence=ev)
     if hist:
         return R(Status.WARN, "מאז האתחול: " + ", ".join(hist) + ".", observed=observed,
-                 expected="ביטים 16-19 כבויים", source=src, age_s=age, limitations=POWER_LIMITATION)
+                 expected="ביטים 16-19 כבויים", source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
     return R(Status.PASS, "לא דווחו אירועי מתח נמוך או האטה מאז האתחול.", observed=observed,
-             expected="ביטים 16-19 כבויים", source=src, age_s=age, limitations=POWER_LIMITATION)
+             expected="ביטים 16-19 כבויים", source=src, age_s=age, limitations=POWER_LIMITATION, evidence=ev)
 
 
 def _unit_state(ctx, role):
@@ -326,59 +352,158 @@ def _service_result(ctx, role, label, extra_ok=None):
              source=src, age_s=age, evidence=ev)
 
 
-@check("pi.watchdog", "pi", "Watchdog")
+def _usec_text_to_s(text):
+    """systemd prints durations like '15s', '2min', '1min 30s', 'infinity', '0'."""
+    if text is None:
+        return None
+    t = str(text).strip()
+    if t in ("", "0"):
+        return 0.0
+    if t == "infinity":
+        return float("inf")
+    total = 0.0
+    for val, unit in re.findall(r"([0-9.]+)\s*(us|ms|s|min|h)?", t):
+        mult = {"us": 1e-6, "ms": 1e-3, "s": 1.0, "min": 60.0, "h": 3600.0, None: 1e-6, "": 1e-6}[unit or None]
+        total += float(val) * mult
+    return total
+
+
+@check("pi.watchdog", "pi", "Watchdog: מוגדר מול פעיל")
 def pi_watchdog(ctx, cfg):
-    r = _service_result(ctx, "watchdog", "ה-watchdog")
-    try:
-        wd, _ = ctx.require_section("watchdog")
-        r.evidence["hardware"] = wd
-        if isinstance(wd, dict) and wd.get("dev_watchdog_exists") is False:
-            r.explanation += " (לא נמצא /dev/watchdog)"
-    except Unavailable:
-        pass
-    return r
+    data, age = ctx.require_section("watchdog")
+    src = ctx.src("Pi collector · systemctl show (manager) + /sys/class/watchdog")
+    sd = data.get("systemd") or {}
+    runtime = sd.get("RuntimeWatchdogUSec")
+    runtime_s = _usec_text_to_s(runtime)
+    expected_txt = ctx.drone.watchdog_expected_runtime
+    expected_s = _usec_text_to_s(expected_txt) if expected_txt else None
+    ping_age = num(data.get("last_ping_age_s"))
+    devices = data.get("devices") or []
+    dev_states = [d.get("state") for d in devices if d.get("state")]
+    ev = {"systemd": sd, "configured_in_files": data.get("configured_in_files"), "devices": devices,
+          "last_ping_age_s": ping_age, "expected_runtime": expected_txt}
+    if not sd:
+        raise Unavailable(R(Status.UNKNOWN, "לא ניתן לקרוא את הגדרות ה-watchdog של systemd: "
+                            + ltr(data.get("systemd_error") or "?"), source=src, age_s=age, evidence=ev))
+    observed = ltr(f"RuntimeWatchdogUSec={runtime} RebootWatchdogUSec={sd.get('RebootWatchdogUSec')}")
+    observed += " · " + (f"ping אחרון לפני {ltr(f'{ping_age:.1f}s')}" if ping_age is not None
+                         else "אין חותמת ping (WatchdogLastPingTimestamp)")
+    if dev_states:
+        observed += " · /sys state: " + ltr(",".join(dev_states))
+    expected = f"מוגדר ({ltr(expected_txt or '> 0')}) ופעיל (ping טרי)"
+    if not runtime_s:
+        return R(Status.FAIL, "ה-watchdog של systemd אינו מוגדר (RuntimeWatchdogSec=0).", observed=observed,
+                 expected=expected, source=src, age_s=age, evidence=ev)
+    if expected_s is not None and abs(runtime_s - expected_s) > 0.5:
+        return R(Status.WARN, f"ה-watchdog מוגדר לערך שונה מהצפוי ({ltr(runtime)} במקום {ltr(expected_txt)}).",
+                 observed=observed, expected=expected, source=src, age_s=age, evidence=ev)
+    fresh_limit = max(2.0 * runtime_s, 5.0) if runtime_s != float("inf") else None
+    proof_ping = ping_age is not None and fresh_limit is not None and ping_age <= fresh_limit
+    proof_sys = "active" in dev_states
+    if proof_ping:
+        return R(Status.PASS, "ה-watchdog מוגדר, ו-systemd מדווח על ping עדכני להתקן החומרה.",
+                 observed=observed, expected=expected, source=src, age_s=age, evidence=ev)
+    if proof_sys:
+        return R(Status.PASS, "ה-watchdog מוגדר, וה-kernel מדווח שהתקן ה-watchdog פעיל (/sys state=active).",
+                 observed=observed, expected=expected, source=src, age_s=age, evidence=ev,
+                 limitations="אין חותמת ping מ-systemd; ההוכחה היא מצב ההתקן ב-/sys בלבד.")
+    return R(Status.WARN, "ה-watchdog מוגדר, אבל אין הוכחת ריצה (אין ping עדכני ואין state=active). "
+             "הגדרה בקובץ אינה הוכחה שהוא פעיל.", observed=observed, expected=expected, source=src,
+             age_s=age, evidence=ev, missing=("watchdog runtime proof",))
 
 
-@check("pi.blackbox", "pi", "קופסה שחורה (רישום)")
+@check("pi.blackbox", "pi", "קופסה שחורה: שירות ודגימות עדכניות")
 def pi_blackbox(ctx, cfg):
     unit_r = _service_result(ctx, "blackbox", "הקופסה השחורה")
-    globs = ctx.drone.blackbox_globs
-    if not globs:
-        if unit_r.status is Status.PASS:
-            unit_r.explanation += " לא הוגדר נתיב לקבצי הלוג, לכן הטריות לא נבדקה."
-            unit_r.status = Status.UNKNOWN
-            unit_r.configured = False
-        return unit_r
     data, age = ctx.require_section("blackbox")
-    src = ctx.src("Pi collector · mtime של קבצי הלוג")
-    newest = data.get("newest") if isinstance(data, dict) else None
+    src = ctx.src("Pi collector · systemctl + CSV של x500-blackbox")
     max_age = num(cfg.get("max_age_s"))
-    if not isinstance(newest, dict):
-        return R(Status.FAIL, "לא נמצאו קבצי לוג בנתיבים שהוגדרו.", observed="0 קבצים",
-                 expected=f"קובץ שהשתנה ב-{max_age or '?'}s האחרונות", source=src, age_s=age,
-                 evidence={"globs": globs, "service": unit_r.observed})
-    fage = num(newest.get("mtime_age_s"))
-    observed = f"{ltr(newest.get('path'))} · עודכן לפני {fmt_age(fage)}"
-    if unit_r.observed:
-        observed = unit_r.observed + " · " + observed
-    ev = {"newest": newest, "file_count": data.get("file_count"), "service": unit_r.evidence}
-    if max_age is None:
-        return R(Status.UNKNOWN, "לא הוגדר גיל מקסימלי לקובץ הלוג.", observed=observed, source=src,
-                 age_s=age, configured=False, evidence=ev)
-    if fage is None:
-        raise Unavailable(R(Status.UNKNOWN, "זמן העדכון של קובץ הלוג לא דווח.", source=src, age_s=age))
-    if fage > max_age:
-        return R(Status.FAIL, "קובץ הלוג החדש ביותר לא התעדכן לאחרונה - ייתכן שהרישום נעצר.",
-                 observed=observed, expected=f"עדכון ב-{max_age:g}s האחרונות", source=src, age_s=age, evidence=ev)
-    if unit_r.status in (Status.FAIL, Status.WARN):
-        unit_r.observed = observed
+    samples = data.get("samples") if isinstance(data, dict) else None
+    newest = data.get("newest") if isinstance(data, dict) else None
+    ev = {"service": unit_r.evidence, "file_count": data.get("file_count"), "oldest_file": data.get("oldest_file"),
+          "newest": newest, "samples": samples, "configured_sleep_s": ctx.drone.blackbox_sleep_s}
+    lim = ("הקצב בפועל הוא זמן הדגימה + השינה (sleep), לא 10 שניות מדויקות. שמירה (retention) לא מאומתת - "
+           "הלוגר הקיים לא מוחק קבצים ולא נמצא timer לניקוי במקור.")
+    if not unit_r.configured:
+        unit_r.limitations = lim
         unit_r.evidence.update(ev)
         return unit_r
-    status = Status.PASS if unit_r.status is Status.PASS or not unit_r.configured else unit_r.status
-    expl = "קובץ הלוג מתעדכן."
-    if not unit_r.configured:
-        expl += " (שם השירות לא הוגדר - נבדקה רק טריות הקבצים.)"
-    return R(status, expl, observed=observed, expected=f"עדכון ב-{max_age:g}s האחרונות",
+    if newest is None:
+        return R(Status.FAIL, "לא נמצאו קבצי CSV של הקופסה השחורה.", observed=unit_r.observed,
+                 expected="שירות פעיל + דגימה תקינה עדכנית", source=src, age_s=age, evidence=ev, limitations=lim)
+    if not isinstance(samples, dict) or not samples.get("valid_rows"):
+        bad = (samples or {}).get("invalid_examples")
+        return R(Status.FAIL, "אין דגימות תקינות בקובץ האחרון" + (f" ({ltr(bad)})" if bad else "") + ".",
+                 observed=unit_r.observed, expected="שירות פעיל + דגימה תקינה עדכנית", source=src, age_s=age,
+                 evidence=ev, limitations=lim)
+    last_age = num(samples.get("last_valid_age_s"))
+    interval = (samples.get("interval_s") or {}).get("median")
+    observed = (f"{unit_r.observed} · דגימה תקינה אחרונה לפני {ltr(fmt_age(last_age))}"
+                + (f" · קצב בפועל ~{ltr(f'{interval:g}s')}" if interval else "")
+                + f" · {data.get('file_count')} קבצים")
+    expected = f"שירות פעיל + דגימה תקינה ב-{max_age:g}s האחרונות" if max_age else "לא מוגדר"
+    if max_age is None:
+        return R(Status.UNKNOWN, "לא הוגדר גיל מקסימלי לדגימה.", observed=observed, source=src, age_s=age,
+                 configured=False, evidence=ev, limitations=lim)
+    if last_age is None or last_age > max_age:
+        return R(Status.FAIL, "הדגימה התקינה האחרונה ישנה - ייתכן שהרישום נעצר.", observed=observed,
+                 expected=expected, source=src, age_s=age, evidence=ev, limitations=lim)
+    if unit_r.status is not Status.PASS:
+        unit_r.observed, unit_r.expected, unit_r.limitations = observed, expected, lim
+        unit_r.evidence.update(ev)
+        return unit_r
+    if samples.get("header_ok") is False:
+        return R(Status.WARN, "הדגימות עדכניות, אבל כותרת ה-CSV שונה מהצפוי.", observed=observed,
+                 expected=expected, source=src, age_s=age, evidence=ev, limitations=lim)
+    return R(Status.PASS, "השירות פעיל ויש דגימה תקינה עדכנית.", observed=observed, expected=expected,
+             source=src, age_s=age, evidence=ev, limitations=lim)
+
+
+@check("pi.monitors", "pi", "שירותי ניטור (health / net)")
+def pi_monitors(ctx, cfg):
+    results = [_service_result(ctx, role, label) for role, label in
+               (("health_monitor", "ניטור הבריאות"), ("net_monitor", "ניטור הרשת"))]
+    configured = [r for r in results if r.configured]
+    src = ctx.src("Pi collector · systemctl show")
+    if not configured:
+        return R(Status.UNKNOWN, "לא הוגדרו שמות שירותי הניטור.", source=src, configured=False)
+    order = [Status.FAIL, Status.UNKNOWN, Status.WARN, Status.PASS]
+    worst = min((r.status for r in configured), key=order.index)
+    observed = " · ".join(r.observed or "—" for r in configured)
+    expl = {Status.PASS: "שירותי הניטור פעילים.", Status.WARN: "שירות ניטור הופעל מחדש לאחרונה.",
+            Status.FAIL: "שירות ניטור אינו פעיל.", Status.UNKNOWN: "מצב שירות ניטור אינו ידוע."}[worst]
+    return R(worst, expl, observed=observed, expected="active/running", source=src,
+             evidence={r.observed: r.evidence for r in configured})
+
+
+@check("pi.fc_usb", "pi", "Pixhawk ב-USB (by-id)")
+def pi_fc_usb(ctx, cfg):
+    data, age = ctx.require_section("fc_usb")
+    src = ctx.src("Pi collector · /dev/serial/by-id (לא נפתח)")
+    matches = data.get("matches") or []
+    names = [m.get("by_id", "") for m in matches]
+    expected_name = ctx.drone.expected_fc_byid
+    ev = {"glob": data.get("glob"), "matches": matches, "tty_acm": data.get("tty_acm")}
+    try:
+        mr, _ = ctx.require_section("mavlink_router")
+        uart = [e.get("Device") for e in (mr.get("endpoints") or []) if str(e.get("type", "")).lower() == "uartendpoint"]
+        ev["router_uart_devices"] = uart
+    except Unavailable:
+        uart = None
+    observed = ltr(", ".join(n.rsplit("/", 1)[-1] for n in names)) if names else "לא נמצא"
+    if not matches:
+        return R(Status.FAIL, "לא נמצא התקן Pixhawk לפי התבנית ב-/dev/serial/by-id.", observed=observed,
+                 expected=ltr(data.get("glob") or "?"), source=src, age_s=age, evidence=ev)
+    if expected_name:
+        if not any(n.endswith("/" + expected_name) or n == expected_name for n in names):
+            return R(Status.FAIL, "נמצא Pixhawk, אבל לא ההתקן המוגדר (מספר סידורי שונה?).", observed=observed,
+                     expected=ltr(expected_name), source=src, age_s=age, evidence=ev)
+    if uart and not any(any(u == n or u.endswith(n.rsplit("/", 1)[-1]) for n in names) for u in uart if u):
+        return R(Status.WARN, "ה-UartEndpoint ב-mavlink-router מצביע על התקן אחר מזה שנמצא.", observed=observed,
+                 expected="התאמה ל-UartEndpoint", source=src, age_s=age, evidence=ev)
+    expl = "התקן ה-Pixhawk קיים ב-USB." + ("" if expected_name else
+                                            " (לא הוגדר by-id צפוי - הזהות לא אומתה מול מספר סידורי.)")
+    return R(Status.PASS, expl, observed=observed, expected=ltr(expected_name or data.get("glob") or "?"),
              source=src, age_s=age, evidence=ev)
 
 
@@ -393,6 +518,15 @@ def pi_mavlink_router(ctx, cfg):
             eps = mr.get("endpoints") or []
             if eps:
                 r.observed = (r.observed or "") + f" · {len(eps)} endpoints"
+            tcp = (mr.get("general") or {}).get("TcpServerPort")
+            if tcp:
+                r.observed = (r.observed or "") + f" · {ltr(f'TCP {tcp}')}"
+            placeholders = [f"{e.get('type')} {e.get('name')}" for e in eps
+                            if any("NOT_CONFIGURED" in str(v) for v in e.values())]
+            if placeholders and r.status is Status.PASS:
+                r.status = Status.WARN
+                r.explanation += (" בקובץ ההגדרות יש ערכי סימון (NOT_CONFIGURED) ב-"
+                                  + ltr(", ".join(placeholders)) + " - כנראה הועתק מה-snapshot בלי התאמה.")
     except Unavailable:
         pass
     return r
@@ -411,6 +545,16 @@ def pi_camera(ctx, cfg):
         raise Unavailable(R(Status.UNKNOWN, "פלט רשימת המצלמות לא תקין.", source=src, age_s=age, evidence=data))
     if not cams:
         busy = data.get("note")
+        video_active = None
+        try:
+            vdata, _ = ctx.require_section("video")
+            video_active = vdata.get("active_profile")
+        except Unavailable:
+            pass
+        if video_active:
+            return R(Status.UNKNOWN, f"לא זוהתה מצלמה בזמן ששירות הווידאו ({ltr(video_active)}) פעיל - "
+                     "ייתכן שהמצלמה תפוסה. אין ראיה לכאן או לכאן.", observed="0 מצלמות", expected="IMX219 מזוהה",
+                     source=src, age_s=age, evidence=data)
         return R(bad, "לא זוהתה מצלמה." + (f" ({ltr(busy)})" if busy else ""), observed="0 מצלמות",
                  expected="IMX219 מזוהה", source=src, age_s=age, evidence=data)
     names = ", ".join(str(c.get("sensor") or c.get("desc") or "?") for c in cams)

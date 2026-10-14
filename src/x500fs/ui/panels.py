@@ -36,6 +36,7 @@ class TelemetryPanel(QWidget):
         ("ekf", "EKF"),
         ("batt", "סוללה"),
         ("att", "גלגול / עלרוד / כיוון"),
+        ("hud", "כיוון / מהירות קרקע / גובה יחסי"),
         ("gcs", "תחנת קרקע בקישור"),
         ("rtt", "RTT לאפליקציה (SSH)"),
         ("pi", "Pi: טמפ' / CPU / RAM"),
@@ -134,6 +135,23 @@ class TelemetryPanel(QWidget):
                 self._set("att", "נתון לא תקין")
         else:
             self._set("att", "—")
+        hud = snap.get("mav.msg.VFR_HUD")
+        gpi = snap.get("mav.msg.GLOBAL_POSITION_INT")
+        parts, ages = [], []
+        if hud:
+            h, gs = hud.value.get("heading"), hud.value.get("groundspeed")
+            parts.append(_ltr(f"{h}°") if isinstance(h, int) and 0 <= h <= 360 else "כיוון ?")
+            parts.append(_ltr(f"{gs:.1f} m/s") if isinstance(gs, (int, float)) else "מהירות ?")
+            ages.append(hud.age(now))
+        else:
+            parts += ["כיוון —", "מהירות —"]
+        ra = gpi.value.get("relative_alt") if gpi else None
+        if isinstance(ra, int):
+            parts.append(_ltr(f"{ra / 1000:.1f} m"))
+            ages.append(gpi.age(now))
+        else:
+            parts.append("גובה —")
+        self._set("hud", " · ".join(parts), max(ages) if ages else None)
         gcs = [o for o in snap.with_prefix("mav.peer.") if P.is_gcs_heartbeat(o.value) and o.age(now) < 5]
         self._set("gcs", ", ".join(_ltr(o.key[9:]) for o in gcs) if gcs else "לא נראתה")
         if rtt.get("count"):

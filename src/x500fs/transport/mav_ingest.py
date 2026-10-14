@@ -47,7 +47,7 @@ class MavIngest:
         self.msgs_rx = 0
         self._lock = threading.Lock()
         self._prearm = deque(maxlen=50)
-        self._chunks: dict[int, list[str]] = {}
+        self._chunks: dict[int, dict[int, str]] = {}
         self.acks: deque = deque(maxlen=50)
         self._ack_event = threading.Event()
         self.connected = False
@@ -131,25 +131,43 @@ class MavIngest:
         ts = d.get("target_system")
         if ts not in (None, 0, self.my_sysid):
             return  # someone else's command (e.g. Mission Planner)
+        tc = d.get("target_component")
+        if ts == self.my_sysid and tc not in (None, 0, self.my_compid):
+            return
         self.acks.append({
             "command": d.get("command"),
             "result": d.get("result"),
             "result_name": C.MAV_RESULT_NAMES.get(d.get("result"), str(d.get("result"))),
             "t_mono": time.monotonic(),
+            "src_sysid": sysid,
+            "src_compid": compid,
+            "target_system": ts,
+            "target_component": tc,
         })
         self._ack_event.set()
 
-    def wait_ack(self, command: int, after: float, timeout: float) -> dict | None:
+    def wait_ack(self, command: int, after: float, timeout: float,
+                 src: tuple[int, int] | None = None) -> dict | None:
+        """Return the first ACK for `command` received after `after`.
+
+        With `src`, only an ACK from that (sysid, compid) counts - an ACK from
+        another system (or a GCS) never satisfies a request sent to the vehicle.
+        """
         deadline = time.monotonic() + timeout
         while True:
             for a in list(self.acks):
-                if a["command"] == command and a["t_mono"] >= after:
+                if a["command"] == command and a["t_mono"] >= after and \
+                        (src is None or (a["src_sysid"], a["src_compid"]) == src):
                     return a
             left = deadline - time.monotonic()
             if left <= 0:
                 return None
             self._ack_event.clear()
             self._ack_event.wait(min(left, 0.1))
+
+    def prearm_since(self, t_mono: float) -> list[str]:
+        with self._lock:
+            return list(dict.fromkeys(i["text"] for i in self._prearm if i["t_mono"] >= t_mono))
 
     def mark_unsupported(self, msg_name: str, result_name: str) -> None:
         self._put(f"mav.unsupported.{msg_name}", result_name)
@@ -164,15 +182,18 @@ class MavIngest:
             return
         text = st["text"]
         if st["id"]:
-            # MAVLink2 chunked statustext: collect until a short/terminated chunk.
-            parts = self._chunks.setdefault(st["id"], [])
-            parts.append(text)
+            # MAVLink2 chunked STATUSTEXT: chunks share an id and carry chunk_seq; the
+            # last one is shorter than 50 characters. Reassemble in chunk_seq order.
+            parts = self._chunks.setdefault(st["id"], {})
+            parts[st["chunk_seq"]] = text
             if len(text) >= 50 and len(parts) < 20:
                 return
-            text = "".join(self._chunks.pop(st["id"], []))
+            chunks = self._chunks.pop(st["id"], {})
+            text = "".join(chunks[k] for k in sorted(chunks))
         item = {
             "t_wall": time.time(),
             "t_mono": t_mono,
+            "chunked": bool(st["id"]),
             "severity": st["severity"],
             "severity_name": st["severity_name"],
             "text": text,

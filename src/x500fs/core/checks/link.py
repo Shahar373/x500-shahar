@@ -156,13 +156,28 @@ def link_interfaces(ctx, cfg):
              expected=f"ממשק {PATH_LABEL.get(selected, selected)} פעיל", source=src, age_s=age, evidence=ev)
 
 
-@check("link.lte", "link", "מודם LTE (ZTE F30)")
+def _probe_text(p):
+    if not isinstance(p, dict) or p.get("configured") is False:
+        return "לא מוגדר"
+    if p.get("ok"):
+        rtt = num(p.get("rtt_ms"))
+        return "הצליח" + (f" {ltr(f'{rtt:.0f} ms')}" if rtt is not None else "")
+    return "נכשל" + (f" ({ltr(p.get('error'))})" if p.get("error") else "")
+
+
+def _probes(ctx):
+    data, age = ctx.require_section("net_probes")
+    return data, age, data.get("probes") or {}
+
+
+@check("link.lte", "link", "מודם LTE (ZTE F30): ממשק, שער, אינטרנט")
 def link_lte(ctx, cfg):
     req = cfg.get("required", "auto")
     required = (ctx.drone.link_path == "lte") if req == "auto" else bool(req)
-    src = ctx.src("Pi collector · USB sysfs + ip addr/route")
+    src = ctx.src("Pi collector · USB sysfs + ip addr + ping דרך ממשק ה-LTE")
     try:
         data, age = ctx.require_section("lte")
+        pdata, _, probes = _probes(ctx)
     except Unavailable as u:
         if not required:
             return R(Status.NOT_APPLICABLE, "LTE אינו נדרש בפרופיל/נתיב הנוכחי.", source=src)
@@ -170,56 +185,94 @@ def link_lte(ctx, cfg):
     modems = data.get("usb_modems") or []
     ifaces = data.get("interfaces") or []
     up = [i for i in ifaces if i.get("operstate") in ("up", "unknown") and i.get("ipv4")]
-    via_default = data.get("default_route_via_lte")
-    ping = data.get("ping") or {}
+    gw, inet = probes.get("zte_gateway") or {}, probes.get("internet_via_lte") or {}
     parts = [f"מודם USB: {'כן' if modems else 'לא'}"]
     if modems:
         m = modems[0]
-        parts[0] += f" ({ltr(m.get('vid'))}:{ltr(m.get('pid'))} {ltr(m.get('product') or '')})"
-    parts.append("ממשק: " + (", ".join(f"{ltr(i['name'])} {ltr(i['ipv4'][0])}" for i in up) if up else "אין"))
-    if via_default is not None:
-        parts.append(f"default route דרך LTE: {'כן' if via_default else 'לא'}")
-    if ping:
-        parts.append(f"ping {ltr(ping.get('target'))}: " + ("הצליח" if ping.get("ok") else "נכשל")
-                     + (f" {ping.get('rtt_ms'):.0f}ms" if num(ping.get("rtt_ms")) is not None else ""))
+        parts[0] += f" ({ltr(m.get('vid'))}:{ltr(m.get('pid'))})"
+    parts.append("ממשק: " + (", ".join(f"{ltr(i['name'])} {ltr(i['ipv4'][0])}" for i in up) if up
+                              else f"{ltr(data.get('configured_interface') or '?')} לא פעיל"))
+    parts.append("שער ZTE: " + _probe_text(gw))
+    parts.append("אינטרנט דרך LTE: " + _probe_text(inet))
     observed = " · ".join(parts)
-    ev = data
+    ev = {"lte": data, "zte_gateway": gw, "internet_via_lte": inet}
+    lim = NOT_MAVLINK + " הצלחת ping לשער המודם מוכיחה רק קישור USB תקין למודם, לא חיבור סלולרי."
     if not required:
         return R(Status.NOT_APPLICABLE, "LTE אינו נדרש בפרופיל/נתיב הנוכחי. המידע מוצג לידיעה.",
-                 observed=observed, source=src, age_s=age, evidence=ev)
-    if not modems:
-        return R(Status.FAIL, "מודם ה-LTE לא זוהה ב-USB.", observed=observed, expected="מודם מזוהה עם ממשק פעיל",
-                 source=src, age_s=age, evidence=ev)
+                 observed=observed, source=src, age_s=age, evidence=ev, limitations=lim)
+    if not modems and not up:
+        return R(Status.FAIL, "מודם ה-LTE לא זוהה (לא ב-USB ולא כממשק פעיל).", observed=observed,
+                 expected="מודם + ממשק פעיל + אינטרנט דרך LTE", source=src, age_s=age, evidence=ev, limitations=lim)
     if not up:
-        return R(Status.FAIL, "המודם זוהה אך אין ממשק רשת פעיל עם כתובת.", observed=observed,
-                 expected="ממשק LTE פעיל עם כתובת", source=src, age_s=age, evidence=ev)
-    if ping and not ping.get("ok"):
-        return R(Status.FAIL, "המודם מחובר אך ping דרך ממשק ה-LTE נכשל.", observed=observed,
-                 expected="ping מצליח דרך LTE", source=src, age_s=age, limitations=NOT_MAVLINK, evidence=ev)
-    if not ping:
-        return R(Status.WARN, "המודם והממשק פעילים, אך לא הוגדר יעד ping לבדיקת חיבור בפועל דרך LTE.",
-                 observed=observed, expected="ping מצליח דרך LTE", source=src, age_s=age,
-                 limitations=NOT_MAVLINK, evidence=ev)
-    return R(Status.PASS, "מודם LTE פעיל ו-ping דרכו הצליח.", observed=observed,
-             expected="מודם + ממשק + ping", source=src, age_s=age, limitations=NOT_MAVLINK, evidence=ev)
+        return R(Status.FAIL, "המודם זוהה אך ממשק ה-LTE לא פעיל או בלי כתובת.", observed=observed,
+                 expected="ממשק LTE פעיל עם כתובת", source=src, age_s=age, evidence=ev, limitations=lim)
+    if inet.get("configured") is False:
+        return R(Status.UNKNOWN, "לא הוגדר יעד ping, לכן לא נבדק אינטרנט דרך LTE.", observed=observed,
+                 expected="אינטרנט דרך LTE", source=src, age_s=age, configured=False, evidence=ev, limitations=lim)
+    if not inet.get("ok"):
+        return R(Status.FAIL, "אין אינטרנט דרך ממשק ה-LTE.", observed=observed, expected="אינטרנט דרך LTE",
+                 source=src, age_s=age, evidence=ev, limitations=lim)
+    if gw.get("configured") is False:
+        return R(Status.WARN, "אינטרנט דרך LTE תקין; כתובת שער ה-ZTE לא הוגדרה ולכן לא נבדקה.", observed=observed,
+                 expected="שער ZTE + אינטרנט דרך LTE", source=src, age_s=age, evidence=ev, limitations=lim)
+    return R(Status.PASS, "המודם, הממשק והאינטרנט דרך LTE תקינים.", observed=observed,
+             expected="מודם + ממשק + אינטרנט דרך LTE", source=src, age_s=age, evidence=ev, limitations=lim)
 
 
-@check("link.internet", "link", "גישה לאינטרנט מה-Pi")
+@check("link.internet", "link", "נתיב לאינטרנט ו-ICMP מה-Pi")
 def link_internet(ctx, cfg):
-    data, age = ctx.require_section("internet")
-    src = ctx.src("Pi collector · ping")
-    if not isinstance(data, dict) or not data.get("target"):
-        return R(Status.UNKNOWN, "לא הוגדר יעד ping בהגדרות.", source=src, age_s=age, configured=False,
+    data, age, probes = _probes(ctx)
+    src = ctx.src("Pi collector · ip route get + ping")
+    route = data.get("internet_route") or {}
+    target = (data.get("config") or {}).get("ping_target")
+    if not target:
+        return R(Status.NOT_APPLICABLE, "לא הוגדר יעד ping.", source=src, age_s=age, configured=False,
                  limitations=NOT_MAVLINK)
-    ok = data.get("ok")
-    observed = f"ping {ltr(data.get('target'))}: " + ("הצליח" if ok else "נכשל")
-    if num(data.get("rtt_ms")) is not None:
-        observed += f" {data['rtt_ms']:.0f}ms"
-    if ok:
-        return R(Status.PASS, "יש גישה ליעד שהוגדר.", observed=observed, expected="ping מצליח", source=src,
-                 age_s=age, limitations=NOT_MAVLINK, evidence=data)
-    return R(Status.WARN, "אין גישה ליעד שהוגדר.", observed=observed, expected="ping מצליח", source=src,
-             age_s=age, limitations=NOT_MAVLINK, evidence=data)
+    d = probes.get("internet_default_route") or {}
+    parts = [f"נתיב: {ltr(route.get('dev') or '?')}" + (f" דרך {ltr(route.get('gateway'))}" if route.get("gateway") else ""),
+             f"ping {ltr(target)}: {_probe_text(d)}",
+             f"Wi-Fi: {_probe_text(probes.get('internet_via_wifi'))}",
+             f"LTE: {_probe_text(probes.get('internet_via_lte'))}"]
+    observed = " · ".join(parts)
+    ev = {"route": route, "probes": probes}
+    if d.get("ok"):
+        return R(Status.PASS, "יש גישה ליעד דרך הנתיב הנוכחי.", observed=observed, expected="ping מצליח",
+                 source=src, age_s=age, limitations=NOT_MAVLINK, evidence=ev)
+    return R(Status.WARN, "אין גישה ליעד דרך הנתיב הנוכחי.", observed=observed, expected="ping מצליח",
+             source=src, age_s=age, limitations=NOT_MAVLINK, evidence=ev)
+
+
+@check("link.tailscale", "link", "Tailscale ב-Pi")
+def link_tailscale(ctx, cfg):
+    data, age, _ = _probes(ctx)
+    src = ctx.src("Pi collector · systemctl is-active tailscaled + tailscale ip -4")
+    ts = data.get("tailscale") or {}
+    observed = f"שירות: {ltr(ts.get('service') or '?')} · IPv4: {ltr(ts.get('ipv4') or 'אין')}"
+    lim = "מקשיב הווידאו (SRT) של ה-Pi נקשר לכתובת ה-Tailscale שלו, לכן בלי Tailscale אין וידאו."
+    if ts.get("service") == "active" and ts.get("ipv4"):
+        return R(Status.PASS, "Tailscale פעיל ויש לו כתובת IPv4.", observed=observed,
+                 expected="active + IPv4", source=src, age_s=age, evidence=ts, limitations=lim)
+    if ts.get("service") is None and ts.get("ipv4") is None:
+        raise Unavailable(R(Status.UNKNOWN, "מצב Tailscale לא דווח.", source=src, age_s=age, evidence=ts))
+    return R(Status.FAIL, "Tailscale לא פעיל או בלי כתובת IPv4.", observed=observed, expected="active + IPv4",
+             source=src, age_s=age, evidence=ts, limitations=lim)
+
+
+@check("link.ground", "link", "הגעה מה-Pi לתחנת הקרקע (ICMP)")
+def link_ground(ctx, cfg):
+    data, age, probes = _probes(ctx)
+    src = ctx.src("Pi collector · ping לכתובת תחנת הקרקע")
+    g = probes.get("ground_station") or {}
+    lim = NOT_MAVLINK + " זו בדיקת ICMP בלבד מה-Pi לכתובת שהוגדרה."
+    if g.get("configured") is False:
+        return R(Status.NOT_APPLICABLE, "לא הוגדרה כתובת תחנת קרקע להגעה מה-Pi.", source=src, age_s=age,
+                 configured=False, limitations=lim)
+    observed = f"ping: {_probe_text(g)}"
+    if g.get("ok"):
+        return R(Status.PASS, "ה-Pi מגיע לכתובת תחנת הקרקע (ICMP).", observed=observed, expected="ping מצליח",
+                 source=src, age_s=age, evidence=g, limitations=lim)
+    return R(Status.WARN, "ה-Pi לא מגיע לכתובת תחנת הקרקע (ICMP). ייתכן שחומת אש חוסמת ICMP.", observed=observed,
+             expected="ping מצליח", source=src, age_s=age, evidence=g, limitations=lim)
 
 
 @check("link.mavlink_heartbeat", "link", "HEARTBEAT מבקר הטיסה")
@@ -229,7 +282,7 @@ def link_heartbeat(ctx, cfg):
     hb, age = ctx.require_msg("HEARTBEAT", None)
     src = ctx.src(f"MAVLink HEARTBEAT · {ctx.mav_endpoint()}")
     sysid = link.get("target_sysid")
-    observed = f"לפני {ltr(fmt_age(age))} · {ltr(f'sysid {sysid}')}"
+    observed = f"לפני {ltr(fmt_age(age))} · {ltr(f'sysid {sysid}')} · דרך {ltr(link.get('endpoint') or '?')}"
     ev = {"link": link}
     if max_age is None:
         return R(Status.UNKNOWN, "לא הוגדר גיל מקסימלי ל-HEARTBEAT.", observed=observed, source=src,

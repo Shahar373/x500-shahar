@@ -8,7 +8,9 @@ Safety properties (enforced in :meth:`MavlinkClient._send` and tested):
 * Uses its own sysid/compid (default 247/25), distinct from the GCS sysid.
 * The only messages it may transmit are PARAM_REQUEST_READ and COMMAND_LONG
   carrying MAV_CMD_REQUEST_MESSAGE (a one-shot request that neither changes
-  stream rates nor writes parameters). Anything else raises.
+  stream rates nor writes parameters) or MAV_CMD_RUN_PREARM_CHECKS (a
+  non-actuating diagnostic, sent only on an explicit preflight action while a
+  fresh HEARTBEAT shows the vehicle disarmed). Anything else raises.
 * Active requests are optional (``request_messages``); in passive mode the
   client only listens.
 """
@@ -28,7 +30,7 @@ from .streams import ByteStream
 
 log = logging.getLogger(__name__)
 
-ALLOWED_COMMANDS = frozenset({C.MAV_CMD_REQUEST_MESSAGE})
+ALLOWED_COMMANDS = frozenset({C.MAV_CMD_REQUEST_MESSAGE, C.MAV_CMD_RUN_PREARM_CHECKS})
 ALLOWED_MSG_TYPES = frozenset({"PARAM_REQUEST_READ", "COMMAND_LONG"})
 
 
@@ -45,10 +47,13 @@ class MavConfig:
     request_interval_s: float = 2.0
     request_list: list[str] = field(default_factory=lambda: [
         "SYS_STATUS", "GPS_RAW_INT", "EKF_STATUS_REPORT", "GLOBAL_POSITION_INT", "BATTERY_STATUS",
+        "ATTITUDE", "VFR_HUD",
     ])
     once_list: list[str] = field(default_factory=lambda: ["AUTOPILOT_VERSION", "HOME_POSITION"])
     reconnect_min_s: float = 1.0
     reconnect_max_s: float = 10.0
+    prearm_ack_timeout_s: float = 3.0
+    prearm_window_s: float = 6.0     # wait this long after ACCEPTED for a fresh SYS_STATUS
 
 
 class _Writer:
@@ -77,6 +82,8 @@ class MavlinkClient:
         self._mav = None
         self._stream: ByteStream | None = None
         self._req_ack_misses = 0
+        self._prearm_request = False
+        self._prearm: dict | None = None
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -99,6 +106,11 @@ class MavlinkClient:
             for p in params:
                 self._params[p] = {"tries": 0, "last_sent": 0.0, "requested_at": now}
             self._once_pending = list(self.cfg.once_list)
+
+    def request_prearm_diagnostic(self) -> None:
+        """Ask ArduPilot to run its pre-arm checks now (explicit preflight only)."""
+        with self._lock:
+            self._prearm_request = True
 
     # ------------------------------------------------------------------
     def _run(self) -> None:
@@ -127,6 +139,7 @@ class MavlinkClient:
             last_req = 0.0
             last_param_batch = 0.0
             last_state_pub = 0.0
+            last_state = ""
             pending_req: tuple[str, float] | None = None
             req_queue: list[str] = []
             try:
@@ -149,6 +162,13 @@ class MavlinkClient:
                     # --- heartbeat freshness / link state -------------------
                     hb = self.ingest.store.get("mav.msg.HEARTBEAT")
                     fresh = hb is not None and now - hb.t_mono <= self.cfg.heartbeat_timeout_s
+                    # Publish the link state before recording the transition, so anyone
+                    # reacting to the session log already sees the new state.
+                    state = "live" if fresh else ("stale" if hb else "waiting_heartbeat")
+                    if now - last_state_pub > 0.5 or state != last_state:
+                        last_state_pub, last_state = now, state
+                        self.ingest.publish_link(True, state, requests=self.cfg.request_messages,
+                                                 request_ack_misses=self._req_ack_misses)
                     if fresh and not was_live:
                         was_live = True
                         backoff = self.cfg.reconnect_min_s
@@ -156,17 +176,15 @@ class MavlinkClient:
                     elif not fresh and was_live:
                         was_live = False
                         self.session.link_down("mavlink", "HEARTBEAT timeout")
-                    if now - last_state_pub > 0.5:
-                        last_state_pub = now
-                        state = "live" if fresh else ("stale" if hb else "waiting_heartbeat")
-                        self.ingest.publish_link(True, state, requests=self.cfg.request_messages,
-                                                 request_ack_misses=self._req_ack_misses)
+                    if self.ingest.target and fresh:
+                        self._prearm_step(now)
                     if not self.cfg.request_messages or not self.ingest.target or not fresh:
                         continue
                     # --- one-shot message requests, one at a time -----------
                     if pending_req is not None:
                         name, sent = pending_req
-                        ack = self.ingest.wait_ack(C.MAV_CMD_REQUEST_MESSAGE, sent, 0)
+                        ack = self.ingest.wait_ack(C.MAV_CMD_REQUEST_MESSAGE, sent, 0,
+                                                   src=(self.ingest.target, C.MAV_COMP_ID_AUTOPILOT1))
                         if ack is not None:
                             pending_req = None
                             self._req_ack_misses = 0
@@ -223,6 +241,66 @@ class MavlinkClient:
         self.sent_log.append((mtype, cmd))
         if len(self.sent_log) > 2000:
             del self.sent_log[:1000]
+
+    # ------------------------------------------------------------------ pre-arm diagnostic
+    def _publish_prearm(self) -> None:
+        self.ingest._put("mav.prearm_diag", dict(self._prearm))
+
+    def _prearm_step(self, now: float) -> None:
+        with self._lock:
+            requested, self._prearm_request = self._prearm_request, False
+        st = self._prearm
+        if requested and (st is None or st.get("finished")):
+            hb = self.ingest.store.get("mav.msg.HEARTBEAT")
+            armed = None
+            if hb is not None and now - hb.t_mono <= self.cfg.heartbeat_timeout_s:
+                from ..core.mav import parse as P
+                armed = P.is_armed(hb.value)
+            base = {"requested_wall": time.time(), "finished": True, "texts": []}
+            if not self.cfg.request_messages:
+                self._prearm = {**base, "state": "not_sent", "reason": "passive mode (requests disabled)"}
+            elif armed is None:
+                self._prearm = {**base, "state": "not_sent", "reason": "no fresh vehicle HEARTBEAT - disarmed state not verified"}
+            elif armed:
+                self._prearm = {**base, "state": "not_sent", "reason": "vehicle armed"}
+            else:
+                msg = self._mav.command_long_encode(self.ingest.target, C.MAV_COMP_ID_AUTOPILOT1,
+                                                    C.MAV_CMD_RUN_PREARM_CHECKS, 0, 0, 0, 0, 0, 0, 0, 0)
+                self._send(msg)
+                self._prearm = {**base, "state": "sent", "finished": False, "sent_mono": now}
+            self._publish_prearm()
+            return
+        if st is None or st.get("finished"):
+            return
+        if st["state"] == "sent":
+            ack = self.ingest.wait_ack(C.MAV_CMD_RUN_PREARM_CHECKS, st["sent_mono"], 0,
+                                       src=(self.ingest.target, C.MAV_COMP_ID_AUTOPILOT1))
+            if ack is not None:
+                st.update(result=ack["result"], result_name=ack["result_name"], ack_mono=ack["t_mono"],
+                          ack_from=f"{ack['src_sysid']}/{ack['src_compid']}")
+                if ack["result_name"] == "ACCEPTED":
+                    st["state"] = "accepted"
+                else:
+                    st.update(state="rejected", finished=True)
+                self._publish_prearm()
+            elif now - st["sent_mono"] > self.cfg.prearm_ack_timeout_s:
+                st.update(state="no_ack", finished=True)
+                self._publish_prearm()
+            return
+        if st["state"] == "accepted":
+            ss = self.ingest.store.get("mav.msg.SYS_STATUS")
+            fresh = ss is not None and ss.t_mono > st["ack_mono"]
+            # PreArm STATUSTEXT is emitted while the checks run, i.e. around the ACK.
+            st["texts"] = self.ingest.prearm_since(st["sent_mono"] - 0.5)
+            if fresh and now - st["ack_mono"] >= 1.0:
+                from ..core.mav import parse as P
+                sens = P.sensors(ss.value) or {}
+                st.update(state="complete", finished=True, prearm_bit=sens.get("prearm_check"),
+                          sys_status_after_ack_s=round(ss.t_mono - st["ack_mono"], 2))
+                self._publish_prearm()
+            elif now - st["ack_mono"] > self.cfg.prearm_window_s:
+                st.update(state="no_fresh_sys_status", finished=True)
+                self._publish_prearm()
 
     def _request_message(self, name: str) -> None:
         msg_id = C.MSG_IDS[name]

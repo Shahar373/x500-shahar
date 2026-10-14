@@ -12,6 +12,7 @@
     "rationale": "סוג הסוללה ומספר התאים חייבים להיות מוגדרים במפורש. האפליקציה לא מנחשת אותם."
   },
   "expected_params": {
+    "battery_monitor": {},
     "failsafe": {},
     "rtl": {},
     "fence": {}
@@ -33,9 +34,9 @@
     "pi.temperature": {
       "enabled": true,
       "critical": false,
-      "warn_c": 70,
-      "fail_c": 80,
-      "rationale": "לפי תיעוד Raspberry Pi, ליבות ה-ARM מואטות בהדרגה בין 80°C ל-85°C (הגבול הקשיח 85°C). אזהרה ב-70°C נותנת מרווח. מדיניות - ניתן לשנות."
+      "warn_c": 75,
+      "fail_c": 82,
+      "rationale": "75/82°C הם הספים של x500-health הקיים. לפי Raspberry Pi, ליבות ה-ARM מואטות בהדרגה מ-80°C (גבול קשיח 85°C). מקור: הסקריפט הקיים x500-health / x500-preflight ב-Pi (snapshot 14.10.2026). מדיניות - ניתן לשנות."
     },
     "pi.cpu": {
       "enabled": true,
@@ -47,16 +48,18 @@
     "pi.memory": {
       "enabled": true,
       "critical": false,
-      "warn_available_pct": 15,
+      "warn_available_pct": 10,
       "fail_available_pct": 5,
-      "rationale": "מדיניות ברירת מחדל לזיכרון פנוי (MemAvailable)."
+      "rationale": "x500-health מזהיר כש-RAM בשימוש ≥ 90% (כלומר ≤ 10% פנוי). מקור: הסקריפט הקיים x500-health / x500-preflight ב-Pi (snapshot 14.10.2026). מדיניות - ניתן לשנות."
     },
     "pi.storage": {
       "enabled": true,
       "critical": false,
       "warn_free_mb": 2048,
       "fail_free_mb": 512,
-      "rationale": "מדיניות ברירת מחדל: מקום פנוי עבור רישום קופסה שחורה ולוגים."
+      "rationale": "x500-health: דיסק בשימוש ≥ 85% אזהרה, ≥ 95% קריטי. בנוסף, סף מקום פנוי במגה-בייט עבור הלוגים. מקור: הסקריפט הקיים x500-health / x500-preflight ב-Pi (snapshot 14.10.2026). מדיניות - ניתן לשנות.",
+      "warn_used_pct": 85,
+      "fail_used_pct": 95
     },
     "pi.power_now": {
       "enabled": true,
@@ -68,13 +71,14 @@
     },
     "pi.watchdog": {
       "enabled": true,
-      "critical": false
+      "critical": false,
+      "rationale": "60-x500-watchdog.conf מגדיר RuntimeWatchdogSec=15s. 'מוגדר' אינו 'פעיל': נדרשת הוכחת ריצה (ping אחרון של systemd או /sys state=active)."
     },
     "pi.blackbox": {
       "enabled": true,
       "critical": false,
-      "max_age_s": 120,
-      "rationale": "קובץ הלוג החדש ביותר צריך להשתנות בתוך 120 שניות כדי להיחשב פעיל. מדיניות - התאם לקצב הכתיבה של הלוגר שלך."
+      "max_age_s": 30,
+      "rationale": "x500-preflight הקיים דרש קובץ שעודכן ב-30 השניות האחרונות. כאן נדרשת דגימה תקינה (לא רק mtime). הקצב בפועל = זמן הדגימה + sleep 10."
     },
     "pi.mavlink_router": {
       "enabled": true,
@@ -124,8 +128,9 @@
       "required": "auto"
     },
     "link.internet": {
-      "enabled": false,
-      "critical": false
+      "enabled": true,
+      "critical": false,
+      "rationale": "x500-preflight הקיים מזהיר כשאין אינטרנט. אינטרנט אינו דרישה לבדיקת MAVLink."
     },
     "link.mavlink_heartbeat": {
       "enabled": true,
@@ -169,7 +174,9 @@
     "fc.prearm": {
       "enabled": true,
       "critical": true,
-      "max_age_s": 5
+      "max_age_s": 5,
+      "require_diagnostic": true,
+      "diagnostic_max_age_s": 300
     },
     "fc.arming_checks": {
       "enabled": true,
@@ -294,6 +301,42 @@
       "enabled": true,
       "critical": false,
       "min_fps": null
+    },
+    "pi.monitors": {
+      "enabled": true,
+      "critical": false
+    },
+    "pi.fc_usb": {
+      "enabled": true,
+      "critical": true,
+      "rationale": "x500-preflight הקיים: Pixhawk לא מזוהה ב-USB = FAIL בטיסה, WARN בספסל."
+    },
+    "link.tailscale": {
+      "enabled": true,
+      "critical": false,
+      "rationale": "מקשיב ה-SRT של ה-Pi נקשר לכתובת ה-Tailscale; Tailscale נדרש לווידאו ולנתיבי Tailscale/LTE."
+    },
+    "link.ground": {
+      "enabled": true,
+      "critical": false
+    },
+    "fc.load": {
+      "enabled": true,
+      "critical": true,
+      "warn_pct": 70,
+      "fail_pct": 85,
+      "max_age_s": 5,
+      "rationale": "x500-preflight הקיים: עומס Pixhawk < 70% תקין, < 85% אזהרה, אחרת קריטי. מקור: הסקריפט הקיים x500-health / x500-preflight ב-Pi (snapshot 14.10.2026). מדיניות - ניתן לשנות."
+    },
+    "cfg.battery_monitor": {
+      "enabled": true,
+      "critical": true
+    },
+    "video.pi_service": {
+      "enabled": true,
+      "critical": false,
+      "progress_max_age_s": 3,
+      "rationale": "x500-video הקיים: progress שעודכן ב-3 שניות האחרונות. כאן זה רק ראיה לצד ה-Pi, לא לתמונה חיה במחשב."
     }
   }
 }

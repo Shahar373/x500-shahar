@@ -25,6 +25,7 @@ PARAM_GROUPS: dict[str, list[str]] = {
         "FENCE_ENABLE", "FENCE_TYPE", "FENCE_ACTION", "FENCE_ALT_MAX",
         "FENCE_ALT_MIN", "FENCE_RADIUS", "FENCE_MARGIN",
     ],
+    "battery_monitor": ["BATT_MONITOR", "BATT_VOLT_MULT", "BATT_AMP_PERVLT", "BATT_AMP_OFFSET", "BATT_CAPACITY"],
     "arming": ["ARMING_CHECK", "ARMING_SKIPCHK", "ARMING_RUDDER", "ARMING_OPTIONS"],
     "gps": ["GPS_HDOP_GOOD", "GPS_TYPE", "GPS1_TYPE"],
     "ekf": ["FS_EKF_THRESH", "AHRS_EKF_TYPE"],

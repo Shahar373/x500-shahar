@@ -265,33 +265,96 @@ def test_sensor_unhealthy_required_fails():
     assert res["fc.sensors"].status is Status.FAIL
 
 
-def test_pi_watchdog_unconfigured_is_unknown_with_discovered_hint():
+def test_pi_service_unconfigured_is_unknown_with_discovered_hint():
     w = World().healthy()
     w.drone.services = {"mavlink_router": "mavlink-router"}
     res, _ = w.evaluate()
-    r = res["pi.watchdog"]
+    r = res["pi.monitors"]
     assert r.status is Status.UNKNOWN and not r.configured
-    assert "x500-watchdog.service" in r.explanation
+    r = res["pi.blackbox"]
+    assert r.status is Status.UNKNOWN and not r.configured
+    assert "x500-blackbox.service" in r.explanation
 
 
 def test_pi_service_inactive_fails_and_restarts_warn():
     w = World().healthy()
     doc = copy.deepcopy(w.store.get("pi.collector").value)
     doc["sections"]["services"]["data"]["units"]["mavlink-router"].update({"ActiveState": "failed"})
-    doc["sections"]["services"]["data"]["units"]["x500-watchdog.service"].update({"NRestarts": "3"})
+    doc["sections"]["services"]["data"]["units"]["x500-health-monitor"].update({"NRestarts": "3"})
     w.put("pi.collector", doc)
     res, _ = w.evaluate()
     assert res["pi.mavlink_router"].status is Status.FAIL
+    assert res["pi.monitors"].status is Status.WARN
+
+
+def _wd(w, **systemd):
+    doc = copy.deepcopy(w.store.get("pi.collector").value)
+    wd = doc["sections"]["watchdog"]["data"]
+    wd["systemd"].update(systemd)
+    return doc, wd
+
+
+def test_watchdog_configured_and_active():
+    w = World().healthy()
+    res, _ = w.evaluate()
+    assert res["pi.watchdog"].status is Status.PASS
+
+
+def test_watchdog_configured_without_runtime_proof_is_not_pass():
+    w = World().healthy()
+    doc, wd = _wd(w)
+    wd["last_ping_age_s"] = None
+    for d in wd["devices"]:
+        d.pop("state", None)
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.watchdog"].status is Status.WARN
+    assert "הוכחת ריצה" in res["pi.watchdog"].explanation
+
+
+def test_watchdog_stale_ping_and_wrong_config():
+    w = World().healthy()
+    doc, wd = _wd(w)
+    wd["last_ping_age_s"] = 120.0
+    for d in wd["devices"]:
+        d["state"] = "inactive"
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.watchdog"].status is Status.WARN
+    doc, wd = _wd(w, RuntimeWatchdogUSec="0")
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.watchdog"].status is Status.FAIL
+    doc, wd = _wd(w, RuntimeWatchdogUSec="30s")
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
     assert res["pi.watchdog"].status is Status.WARN
 
 
-def test_blackbox_stale_log_fails():
+def test_blackbox_needs_service_and_recent_valid_sample():
     w = World().healthy()
+    res, _ = w.evaluate()
+    assert res["pi.blackbox"].status is Status.PASS
     doc = copy.deepcopy(w.store.get("pi.collector").value)
-    doc["sections"]["blackbox"]["data"]["newest"]["mtime_age_s"] = 3600
+    doc["sections"]["blackbox"]["data"]["samples"]["last_valid_age_s"] = 3600
     w.put("pi.collector", doc)
     res, _ = w.evaluate()
     assert res["pi.blackbox"].status is Status.FAIL
+    # a fresh file mtime alone is not enough: no valid rows -> FAIL
+    doc["sections"]["blackbox"]["data"]["samples"].update({"valid_rows": 0, "last_valid_age_s": None,
+                                                           "invalid_examples": [["bad timestamp"]]})
+    doc["sections"]["blackbox"]["data"]["newest"]["mtime_age_s"] = 1
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.blackbox"].status is Status.FAIL
+    # samples fine but service stopped -> FAIL
+    doc = copy.deepcopy(w.store.get("pi.collector").value)
+    doc["sections"]["blackbox"]["data"]["samples"].update({"valid_rows": 10, "last_valid_age_s": 3})
+    doc["sections"]["services"]["data"]["units"]["x500-blackbox"]["ActiveState"] = "inactive"
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.blackbox"].status is Status.FAIL
+    assert "retention" in res["pi.blackbox"].limitations
 
 
 def test_power_flags_and_limitation_text():

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import getpass
 import glob
 import json
@@ -26,26 +27,48 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
 SCHEMA = "x500fs.collector/1"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ROOT = "/"
 ALLOW_COMMANDS = True
 
 DEFAULT_CONFIG = {
-    "services": {"mavlink_router": "mavlink-router"},
-    "blackbox_globs": [],
+    # Unit names as found in the X500 source snapshot (verify on the Pi).
+    "services": {
+        "mavlink_router": "mavlink-router",
+        "blackbox": "x500-blackbox",
+        "health_monitor": "x500-health-monitor",
+        "net_monitor": "x500-net-monitor",
+        "tailscale": "tailscaled",
+    },
+    "blackbox_globs": ["/var/log/x500/blackbox/x500-blackbox-*.csv"],
     "lte_usb_vids": ["19d2"],
-    "lte_interface": "",
-    "ping_target": "",
+    "wifi_interface": "wlan0",
+    "lte_interface": "eth1",
+    "tailscale_interface": "tailscale0",
+    "zte_gateway": "",
+    "ground_ip": "",
+    "ping_target": "1.1.1.1",
     "tools": [],
     "mediamtx": {"api": "http://127.0.0.1:9997", "path": "x500cam"},
     "camera_probe": True,
     "mavlink_router_conf": ["/etc/mavlink-router/main.conf", "/etc/mavlink-router/config.d/*.conf"],
+    "fc_byid_glob": "usb-Holybro_Pixhawk6C_*-if00",
+    "video": {
+        "profiles": ["high", "normal", "degraded"],
+        "unit_template": "x500-video@{profile}.service",
+        "progress_template": "/run/x500-video-{profile}.progress",
+        "config_file": "/etc/x500/video.conf",
+    },
+    "watchdog_conf_globs": ["/etc/systemd/system.conf", "/etc/systemd/system.conf.d/*.conf"],
 }
 
+# Markers used by the sanitized source snapshot; never treat them as real values.
+MARKER_RE = re.compile(r"NOT_CONFIGURED")
 DISCOVER_RE = re.compile(r"x500|mavlink|watchdog|black|box|logger|camera|mediamtx|tailscale|modem|rpicam", re.I)
 
 
@@ -135,8 +158,131 @@ def parse_proc_stat_cpu(text):
 
 
 def parse_throttled(text):
-    m = re.search(r"throttled=(0x[0-9a-fA-F]+)", text or "")
+    m = re.search(r"throttled=(0x[0-9a-fA-F]+)\s*$", (text or "").strip())
     return int(m.group(1), 16) if m else None
+
+
+THROTTLE_BITS = {0: "under_voltage", 1: "arm_freq_capped", 2: "throttled", 3: "soft_temp_limit"}
+
+
+def decode_throttled(value):
+    """Current (bits 0-3) and since-boot (bits 16-19) flags, kept separate."""
+    if value is None:
+        return None
+    return {
+        "current": [n for b, n in THROTTLE_BITS.items() if value & (1 << b)],
+        "since_boot": [n for b, n in THROTTLE_BITS.items() if value & (1 << (b + 16))],
+    }
+
+
+def parse_measure_temp(text):
+    m = re.search(r"temp=([0-9]+(?:\.[0-9]+)?)'C", text or "")
+    return float(m.group(1)) if m else None
+
+
+def parse_progress(text):
+    """Last block of an ffmpeg -progress file (key=value lines ending with progress=...)."""
+    blocks, cur = [], {}
+    for line in (text or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        cur[k.strip()] = v.strip()
+        if k.strip() == "progress":
+            blocks.append(cur)
+            cur = {}
+    last = blocks[-1] if blocks else (cur or None)
+    if not last:
+        return None
+    out = {"raw": {k: last[k] for k in ("frame", "fps", "bitrate", "total_size", "out_time_us",
+                                         "speed", "drop_frames", "dup_frames", "progress") if k in last}}
+    for k in ("frame", "total_size", "out_time_us", "drop_frames", "dup_frames"):
+        try:
+            out[k] = int(last[k])
+        except (KeyError, ValueError):
+            out[k] = None
+    try:
+        out["fps"] = float(last["fps"])
+    except (KeyError, ValueError):
+        out["fps"] = None
+    out["bitrate"] = last.get("bitrate")
+    out["progress"] = last.get("progress")
+    out["blocks"] = len(blocks)
+    return out
+
+
+def parse_shell_vars(text):
+    """KEY=VALUE lines of a simple sourced shell config (no evaluation)."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k.strip()):
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def parse_iso_ts(text):
+    try:
+        dt = datetime.datetime.fromisoformat(text.strip())
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        return None  # ambiguous local time: refuse rather than guess
+    return dt.timestamp()
+
+
+BLACKBOX_HEADER = ["timestamp", "temp_c", "throttled", "ram_pct", "disk_pct", "load1", "uplink",
+                   "wifi_internet", "lte_internet", "tailscale", "ground", "video_profile",
+                   "video_state", "mavlink"]
+
+
+def parse_blackbox_rows(lines, now_epoch):
+    """Validate the tail of a black-box CSV. Returns per-row validity and cadence."""
+    rows = []
+    header = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        cols = line.split(",")
+        if cols[0] == "timestamp":
+            header = cols
+            continue
+        ts = parse_iso_ts(cols[0])
+        problems = []
+        if len(cols) != len(BLACKBOX_HEADER):
+            problems.append("columns=%d" % len(cols))
+        if ts is None:
+            problems.append("bad timestamp")
+        temp = cols[1] if len(cols) > 1 else ""
+        if temp not in ("NA",) and not re.match(r"^[0-9]+(\.[0-9]+)?$", temp):
+            problems.append("temp=%r" % temp[:12])
+        thr = cols[2] if len(cols) > 2 else ""
+        if thr not in ("NA",) and not re.match(r"^0x[0-9a-fA-F]+$", thr):
+            problems.append("throttled=%r" % thr[:12])
+        rows.append({"ts": ts, "valid": not problems, "problems": problems,
+                     "values": dict(zip(BLACKBOX_HEADER, cols)) if len(cols) == len(BLACKBOX_HEADER) else None})
+    valid = [r for r in rows if r["valid"]]
+    ts_list = [r["ts"] for r in valid if r["ts"] is not None]
+    intervals = [b - a for a, b in zip(ts_list, ts_list[1:]) if b >= a]
+    last_valid = valid[-1] if valid else None
+    return {
+        "header_ok": header == BLACKBOX_HEADER if header is not None else None,
+        "rows_checked": len(rows),
+        "valid_rows": len(valid),
+        "invalid_examples": [r["problems"] for r in rows if not r["valid"]][-3:],
+        "last_valid_age_s": round(now_epoch - last_valid["ts"], 1) if last_valid else None,
+        "last_valid_values": last_valid["values"] if last_valid else None,
+        "interval_s": {
+            "median": round(sorted(intervals)[len(intervals) // 2], 1) if intervals else None,
+            "min": round(min(intervals), 1) if intervals else None,
+            "max": round(max(intervals), 1) if intervals else None,
+            "count": len(intervals),
+        },
+    }
 
 
 def parse_pmic_ext5v(text):
@@ -279,10 +425,23 @@ def sec_thermal(cfg):
             zones.append({"zone": os.path.basename(d), "type": ztype, "temp_c": temp})
         except (OSError, ValueError):
             continue
-    cpu = next((z["temp_c"] for z in zones if "cpu" in z["type"].lower()), None)
-    if cpu is None and zones:
-        cpu = zones[0]["temp_c"]
-    return {"zones": zones, "cpu_temp_c": cpu}
+    zone_temp = next((z["temp_c"] for z in zones if "cpu" in z["type"].lower()), None)
+    if zone_temp is None and zones:
+        zone_temp = zones[0]["temp_c"]
+    out = {"zones": zones, "zone_temp_c": zone_temp, "vcgencmd_temp_c": None, "vcgencmd_error": None}
+    vc = which("vcgencmd")
+    if vc:
+        rc, so, se = run([vc, "measure_temp"], 3)
+        out["vcgencmd_temp_c"] = parse_measure_temp(so)
+        if out["vcgencmd_temp_c"] is None:
+            out["vcgencmd_error"] = ((se or so).strip() or "exit %s" % rc)[:200]
+    else:
+        out["vcgencmd_error"] = "vcgencmd not found"
+    # No reading is ever replaced by 0: if both sources fail, cpu_temp_c is null.
+    out["cpu_temp_c"] = zone_temp if zone_temp is not None else out["vcgencmd_temp_c"]
+    out["cpu_temp_source"] = ("thermal_zone" if zone_temp is not None
+                              else ("vcgencmd" if out["vcgencmd_temp_c"] is not None else None))
+    return out
 
 
 PROC_RE = re.compile(r"^(mediamtx|mtxrpicam.*|rpicam-.*|libcamera.*|ffmpeg|mavlink-route.*)$")
@@ -376,19 +535,22 @@ def sec_storage(cfg):
 
 
 def sec_power(cfg):
-    out = {"vcgencmd": None, "throttled": None, "throttled_raw": None, "ext5v_v": None,
-           "hwmon_undervoltage_alarm": None}
+    out = {"vcgencmd": None, "throttled": None, "throttled_raw": None, "throttled_decoded": None,
+           "vcgencmd_error": None, "ext5v_v": None, "hwmon_undervoltage_alarm": None}
     vc = which("vcgencmd")
     if vc:
         out["vcgencmd"] = vc
         rc, so, se = run([vc, "get_throttled"], 3)
         out["throttled_raw"] = so.strip() or None
-        out["throttled"] = parse_throttled(so)
+        out["throttled"] = parse_throttled(so) if rc == 0 else None
         if out["throttled"] is None:
-            out["vcgencmd_error"] = (se or so).strip()[:200]
+            out["vcgencmd_error"] = ((se or so).strip() or "exit %s" % rc)[:200]
+        out["throttled_decoded"] = decode_throttled(out["throttled"])
         # Documented form lists every PMIC ADC channel (Pi 5); we pick EXT5V_V.
         rc, so, se = run([vc, "pmic_read_adc"], 3)
         out["ext5v_v"] = parse_pmic_ext5v(so)
+    else:
+        out["vcgencmd_error"] = "vcgencmd not found"
     for d in glob.glob(rp("/sys/class/hwmon/hwmon*")):
         name = (read_text(os.path.join(d, "name")) or "").strip()
         if name == "rpi_volt":
@@ -423,19 +585,59 @@ def sec_services(cfg):
     return {"units": units, "discovered": sorted(discovered)}
 
 
+WD_PROPS = ("RuntimeWatchdogUSec,RebootWatchdogUSec,RuntimeWatchdogPreUSec,WatchdogDevice,"
+            "WatchdogLastPingTimestamp,WatchdogLastPingTimestampMonotonic")
+
+
 def sec_watchdog(cfg):
-    out = {"dev_watchdog_exists": os.path.exists(rp("/dev/watchdog")),
-           "devices": []}
+    out = {"dev_watchdog_exists": os.path.exists(rp("/dev/watchdog")), "devices": [],
+           "configured_in_files": [], "systemd": None, "last_ping_age_s": None}
     for d in sorted(glob.glob(rp("/sys/class/watchdog/watchdog*"))):
         info = {"name": os.path.basename(d)}
-        for k in ("identity", "timeout", "state", "status"):
+        for k in ("identity", "timeout", "state", "status", "timeleft"):
             v = read_text(os.path.join(d, k))
             if v is not None:
                 info[k] = v.strip()
         out["devices"].append(info)
-    rc, so, se = run(["systemctl", "show", "--property=RuntimeWatchdogUSec,RebootWatchdogUSec"], 3)
-    out["systemd"] = parse_systemctl_show(so) if rc == 0 else None
+    for pattern in cfg.get("watchdog_conf_globs") or []:
+        for path in sorted(glob.glob(rp(pattern))):
+            for line in (read_text(path) or "").splitlines():
+                line = line.strip()
+                if re.match(r"^(RuntimeWatchdogSec|RebootWatchdogSec|WatchdogDevice)\s*=", line):
+                    out["configured_in_files"].append({"file": os.path.basename(path), "line": line})
+    rc, so, se = run(["systemctl", "show", "--property=" + WD_PROPS], 3)
+    if rc == 0:
+        props = parse_systemctl_show(so)
+        out["systemd"] = props
+        mono = props.get("WatchdogLastPingTimestampMonotonic")
+        # systemd (>= 252) records the last WDIOC_KEEPALIVE on CLOCK_BOOTTIME and exposes it
+        # mapped to CLOCK_MONOTONIC here; "never pinged" is USEC_INFINITY (2^64-1).
+        if mono and mono.isdigit() and 0 < int(mono) < 2 ** 63:
+            age = time.monotonic() - int(mono) / 1e6
+            if age >= 0:
+                out["last_ping_age_s"] = round(age, 2)
+            else:
+                out["last_ping_note"] = "timestamp in the future (clock mapping?)"
+        elif mono and mono.isdigit():
+            out["last_ping_note"] = "never pinged (USEC_INFINITY)"
+    else:
+        out["systemd_error"] = (se or "exit %s" % rc).strip()[:200]
     return out
+
+
+def _tail_lines(path, max_bytes=8192):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    lines = data.splitlines()
+    if size > max_bytes and lines:
+        lines = lines[1:]  # first line may be cut
+    return lines
 
 
 def sec_blackbox(cfg):
@@ -450,14 +652,27 @@ def sec_blackbox(cfg):
             if os.path.isfile(path):
                 files.append((st.st_mtime, st.st_size, path))
     now = time.time()
-    newest = max(files) if files else None
-    return {
+    files.sort()
+    newest = files[-1] if files else None
+    shown = (lambda p: p if ROOT == "/" else "/" + os.path.relpath(p, ROOT))
+    out = {
         "globs": globs,
         "file_count": len(files),
         "total_mb": round(sum(f[1] for f in files) / 1048576.0, 2),
-        "newest": {"path": newest[2] if ROOT == "/" else "/" + os.path.relpath(newest[2], ROOT),
-                   "size": newest[1], "mtime_age_s": round(now - newest[0], 1)} if newest else None,
+        "oldest_file": shown(files[0][2]) if files else None,
+        "newest": {"path": shown(newest[2]), "size": newest[1],
+                   "mtime_age_s": round(now - newest[0], 1)} if newest else None,
+        "samples": None,
     }
+    if newest:
+        lines = _tail_lines(newest[2])
+        # include the header if the file is small enough for it to be in the tail
+        out["samples"] = parse_blackbox_rows(lines[-40:] if len(lines) > 40 else lines, now)
+        if out["samples"]["header_ok"] is None:
+            with open(newest[2], "r", encoding="utf-8", errors="replace") as f:
+                first = f.readline().strip().split(",")
+            out["samples"]["header_ok"] = first == BLACKBOX_HEADER
+    return out
 
 
 def sec_mavlink_router(cfg):
@@ -697,32 +912,157 @@ def sec_usb(cfg):
 
 
 def sec_lte(cfg):
+    """Modem presence and interface state only; reachability lives in net_probes."""
     vids = [v.lower() for v in cfg.get("lte_usb_vids") or []]
     modems = [d for d in _usb_devices() if d["vid"].lower() in vids]
     net = sec_network(cfg)
     ifaces = [i for i in net["interfaces"] if i["kind"] == "lte"]
     routes = net["default_routes"]
-    out = {"usb_modems": modems, "interfaces": ifaces,
+    out = {"usb_modems": modems, "interfaces": ifaces, "configured_interface": cfg.get("lte_interface") or None,
            "default_route_via_lte": bool(routes and routes[0].get("kind") == "lte") if routes else False,
            "mmcli": None}
     if which("mmcli"):
         rc, so, se = run(["mmcli", "-L"], 4)
         out["mmcli"] = {"exit_code": rc, "output": (so or se).strip()[:500]}
-    target = cfg.get("ping_target")
-    if target and ifaces:
-        dev = ifaces[0]["name"]
-        rc, so, se = run(["ping", "-n", "-c", "3", "-W", "2", "-I", dev, target], 10)
-        res = parse_ping(so)
-        out["ping"] = {"target": target, "iface": dev, "ok": rc == 0, **res}
     return out
 
 
-def sec_internet(cfg):
-    target = cfg.get("ping_target")
-    if not target:
-        return {"target": None}
-    rc, so, se = run(["ping", "-n", "-c", "3", "-W", "2", target], 10)
-    return {"target": target, "ok": rc == 0, **parse_ping(so)}
+def _ping(target, iface=None, timeout_s=2):
+    cmd = ["ping", "-n", "-c", "1", "-W", str(timeout_s)]
+    if iface:
+        cmd += ["-I", iface]
+    rc, so, se = run(cmd + [target], timeout_s + 3)
+    res = {"target": target, "iface": iface, "ok": rc == 0}
+    res.update(parse_ping(so))
+    if rc is None or (rc != 0 and se.strip()):
+        res["error"] = (se.strip() or "exit %s" % rc)[:160]
+    return res
+
+
+def sec_net_probes(cfg):
+    """ICMP reachability and routing evidence. NOT a MAVLink quality measurement.
+
+    Each probe is a single bounded ping; probes run in parallel so the section
+    finishes within ~5 s. Unconfigured targets are reported as such, never as
+    failures or successes.
+    """
+    target = cfg.get("ping_target") or ""
+    wifi, lte = cfg.get("wifi_interface") or "", cfg.get("lte_interface") or ""
+    gw, ground = cfg.get("zte_gateway") or "", cfg.get("ground_ip") or ""
+    jobs = {}
+    if target:
+        jobs["internet_default_route"] = (target, None)
+        if wifi:
+            jobs["internet_via_wifi"] = (target, wifi)
+        if lte:
+            jobs["internet_via_lte"] = (target, lte)
+    if gw and not MARKER_RE.search(gw) and lte:
+        jobs["zte_gateway"] = (gw, lte)
+    if ground and not MARKER_RE.search(ground):
+        jobs["ground_station"] = (ground, None)
+    results = {}
+
+    def work(name, tgt, iface):
+        results[name] = _ping(tgt, iface)
+
+    threads = [threading.Thread(target=work, args=(n, t, i)) for n, (t, i) in jobs.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(8)
+    for name in ("internet_default_route", "internet_via_wifi", "internet_via_lte", "zte_gateway",
+                 "ground_station"):
+        if name not in results:
+            results[name] = {"configured": False} if name not in jobs else {"error": "probe did not finish"}
+    route = None
+    if target:
+        try:
+            rg = _ip_json(["route", "get", target])
+            if rg:
+                route = {"dev": rg[0].get("dev"), "gateway": rg[0].get("gateway"), "prefsrc": rg[0].get("prefsrc")}
+        except Exception as e:  # noqa: BLE001
+            route = {"error": str(e)[:160]}
+    ts = {"service": None, "ipv4": None}
+    rc, so, se = run(["systemctl", "is-active", (cfg.get("services") or {}).get("tailscale") or "tailscaled"], 3)
+    ts["service"] = so.strip() or None
+    tsbin = which("tailscale")
+    if tsbin:
+        rc, so, se = run([tsbin, "ip", "-4"], 3)
+        ips = [x for x in so.split() if re.match(r"^\d+\.\d+\.\d+\.\d+$", x)]
+        ts["ipv4"] = ips[0] if ips else None
+        if rc != 0:
+            ts["error"] = (se or "exit %s" % rc).strip()[:160]
+    return {"probes": results, "internet_route": route, "tailscale": ts,
+            "config": {"ping_target": target or None, "wifi_interface": wifi or None, "lte_interface": lte or None,
+                       "zte_gateway_configured": bool(gw and not MARKER_RE.search(gw)),
+                       "ground_ip_configured": bool(ground and not MARKER_RE.search(ground))}}
+
+
+SVC_PROPS = "ActiveState,SubState,MainPID,NRestarts,Result,ActiveEnterTimestampMonotonic,LoadState,UnitFileState"
+
+
+def sec_video(cfg):
+    """State of the existing SRT pipeline (x500-video@<profile>). Read-only.
+
+    Encoder progress is evidence that ffmpeg is producing output on the Pi; it
+    is NOT evidence that the desktop is showing a live picture.
+    """
+    v = cfg.get("video") or {}
+    profiles = v.get("profiles") or ["high", "normal", "degraded"]
+    unit_t = v.get("unit_template") or "x500-video@{profile}.service"
+    prog_t = v.get("progress_template") or "/run/x500-video-{profile}.progress"
+    units = {}
+    active = None
+    for prof in profiles:
+        unit = unit_t.format(profile=prof)
+        rc, so, se = run(["systemctl", "show", unit, "--property=" + SVC_PROPS, "--no-pager"], 3)
+        if rc == 0 and so.strip():
+            info = parse_systemctl_show(so)
+        else:
+            info = {"error": ((se or "").strip() or "exit %s" % rc)[:160]}
+        units[prof] = info
+        if active is None and info.get("ActiveState") in ("active", "activating", "reloading"):
+            active = prof
+    progress = None
+    if active:
+        path = prog_t.format(profile=active)
+        try:
+            st = os.stat(rp(path))
+            progress = {"path": path, "exists": True, "mtime_age_s": round(time.time() - st.st_mtime, 2),
+                        "parsed": parse_progress(read_text(path, 262144))}
+        except OSError:
+            progress = {"path": path, "exists": False}
+    conf_vars = parse_shell_vars(read_text(v.get("config_file") or "/etc/x500/video.conf"))
+    port = conf_vars.get("PORT")
+    listening = None
+    if port and port.isdigit():
+        rc, so, se = run(["ss", "-H", "-l", "-n", "-u"], 3)
+        if rc == 0:
+            listening = [x for x in parse_ss_listening(so) if x["port"] == int(port)]
+    ground = conf_vars.get("GROUND_IP", "")
+    return {
+        "profiles": profiles,
+        "units": units,
+        "active_profile": active,
+        "progress": progress,
+        "config": {"found": bool(conf_vars), "PORT": port,
+                   "GROUND_IP_set": bool(ground) and not MARKER_RE.search(ground)},
+        "udp_listening": listening,
+        "rpicam_vid": bool(which("rpicam-vid")),
+        "ffmpeg": bool(which("ffmpeg")),
+    }
+
+
+def sec_fc_usb(cfg):
+    """Pixhawk USB serial presence via /dev/serial/by-id (never opened)."""
+    pattern = cfg.get("fc_byid_glob") or "usb-Holybro_Pixhawk6C_*-if00"
+    matches = []
+    for path in sorted(glob.glob(rp(os.path.join("/dev/serial/by-id", pattern)))):
+        target = os.path.realpath(path)
+        shown = path if ROOT == "/" else "/" + os.path.relpath(path, ROOT)
+        matches.append({"by_id": shown, "target": os.path.basename(target)})
+    acm = sorted(os.path.basename(p) for p in glob.glob(rp("/dev/ttyACM*")))
+    return {"glob": pattern, "matches": matches, "tty_acm": acm}
 
 
 def sec_tools(cfg):
@@ -751,10 +1091,15 @@ SECTIONS = [
     ("identity", sec_identity), ("uptime", sec_uptime), ("thermal", sec_thermal),
     ("cpu", sec_cpu), ("memory", sec_memory), ("storage", sec_storage), ("power", sec_power),
     ("services", sec_services), ("watchdog", sec_watchdog), ("blackbox", sec_blackbox),
-    ("mavlink_router", sec_mavlink_router), ("camera", sec_camera), ("mediamtx", sec_mediamtx),
-    ("network", sec_network), ("usb", sec_usb), ("lte", sec_lte), ("internet", sec_internet),
-    ("tools", sec_tools),
+    ("mavlink_router", sec_mavlink_router), ("video", sec_video), ("fc_usb", sec_fc_usb),
+    ("camera", sec_camera), ("mediamtx", sec_mediamtx), ("network", sec_network), ("usb", sec_usb),
+    ("lte", sec_lte), ("net_probes", sec_net_probes), ("tools", sec_tools),
 ]
+
+# Cadence classes used by the desktop poller (bounded cadence, cached slow probes).
+FAST_SECTIONS = ["identity", "uptime", "thermal", "cpu", "memory", "storage", "power", "services",
+                 "watchdog", "blackbox", "mavlink_router", "video", "fc_usb"]
+SLOW_SECTIONS = ["camera", "network", "usb", "lte", "net_probes", "mediamtx", "tools"]
 
 
 def collect(cfg, only=None):
@@ -774,6 +1119,7 @@ def collect(cfg, only=None):
         "schema": SCHEMA,
         "collector_version": VERSION,
         "generated_at_epoch": round(time.time(), 3),
+        "pi_monotonic_s": round(time.monotonic(), 3),
         "duration_ms": int((time.time() - t0) * 1000),
         "sections": sections,
     }

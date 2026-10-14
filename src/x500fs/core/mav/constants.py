@@ -134,6 +134,10 @@ SEVERITY_NAMES = {
 
 # --- commands / results -----------------------------------------------------------
 MAV_CMD_REQUEST_MESSAGE = 512
+# Non-actuating diagnostic: ArduPilot runs pre_arm_checks(display_failure=true) and
+# answers ACCEPTED when disarmed / TEMPORARILY_REJECTED when armed. ACCEPTED does
+# NOT mean the checks passed (GCS_Common.cpp handle_command_run_prearm_checks).
+MAV_CMD_RUN_PREARM_CHECKS = 401
 MAV_RESULT_NAMES = {
     0: "ACCEPTED", 1: "TEMPORARILY_REJECTED", 2: "DENIED", 3: "UNSUPPORTED",
     4: "FAILED", 5: "IN_PROGRESS", 6: "CANCELLED",
@@ -150,6 +154,8 @@ MSG_IDS = {
     "BATTERY_STATUS": 147,
     "EKF_STATUS_REPORT": 193,
     "HOME_POSITION": 242,
+    "ATTITUDE": 30,
+    "VFR_HUD": 74,
 }
 
 FIRMWARE_VERSION_TYPES = {0: "dev", 64: "alpha", 128: "beta", 192: "rc", 255: "official"}
