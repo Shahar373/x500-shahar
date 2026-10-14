@@ -463,3 +463,31 @@ def test_unread_param_explains_pending_or_no_answer():
     w.put("mav.param_missing.ARMING_SKIPCHK", True)
     res, _ = w.evaluate()
     assert "לא ענה" in res["fc.arming_checks"].explanation
+
+
+def test_video_restart_loop_is_not_camera_busy():
+    # From a real report: x500-video@degraded crash-loops because the kernel never detected the camera.
+    w = World().healthy()
+    w.drone.video_active = True
+    doc = copy.deepcopy(w.store.get("pi.collector").value)
+    doc["sections"]["camera"]["data"].update(
+        cameras=[], note="No cameras available", in_video_group=True, media_access=True,
+        kernel_sensor={"driver": "imx219", "driver_loaded": False, "devices": []})
+    v = doc["sections"]["video"]["data"]
+    v["active_profile"] = "degraded"
+    v.setdefault("units", {})["degraded"] = {"ActiveState": "activating", "SubState": "auto-restart",
+                                             "NRestarts": "10", "Result": "exit-code"}
+    v["progress"] = {"exists": True, "mtime_age_s": 2.7, "parsed": {"frame": 0, "progress": "end"}}
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.camera"].status is Status.WARN
+    assert "לא טען את מנהל ההתקן" in res["pi.camera"].explanation
+    assert res["video.pi_service"].status is Status.WARN
+    assert "שוב ושוב" in res["video.pi_service"].explanation
+    # a running encoder with a sensor the kernel does see may really be holding the camera
+    doc["sections"]["camera"]["data"]["kernel_sensor"] = {"driver": "imx219", "driver_loaded": True,
+                                                          "devices": ["4-0010"]}
+    v["units"]["degraded"] = {"ActiveState": "active", "SubState": "running", "NRestarts": "0"}
+    w.put("pi.collector", doc)
+    res, _ = w.evaluate()
+    assert res["pi.camera"].status is Status.UNKNOWN

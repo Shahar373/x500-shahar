@@ -105,6 +105,15 @@ def video_pi_service(ctx, cfg):
     bad = Status.FAIL if required else Status.WARN
     if active != ctx.drone.srt_profile and ctx.drone.video_active:
         observed += f" · פרופיל מוגדר באפליקציה: {ltr(ctx.drone.srt_profile)}"
+    unit = units.get(active) or {}
+    if unit.get("SubState") == "auto-restart" or (unit.get("ActiveState") == "activating"
+                                                  and unit.get("NRestarts") not in (None, "", "0")):
+        return R(bad if ctx.drone.video_active or required else Status.WARN,
+                 f"השירות נכשל ו-systemd מפעיל אותו מחדש שוב ושוב ({ltr(unit.get('NRestarts'))} הפעלות מחדש) - "
+                 "המקודד לא מצליח לרוץ. סיבה נפוצה: המצלמה לא זוהתה (ראו 'זיהוי מצלמה'). הפרטים ביומן השירות ב-Pi: "
+                 f"journalctl -u x500-video@{ltr(active)} -n 30",
+                 observed=observed, expected="שירות active/running ו-progress מתעדכן", source=src, age_s=age,
+                 evidence=ev, limitations=PROGRESS_LIMIT)
     pa = num(prog.get("mtime_age_s"))
     if pa is None or pa > max_prog_age or parsed.get("progress") == "end":
         return R(bad if ctx.drone.video_active or required else Status.WARN,

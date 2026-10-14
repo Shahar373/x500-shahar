@@ -583,9 +583,16 @@ def pi_camera(ctx, cfg):
         video_active = None
         try:
             vdata, _ = ctx.require_section("video")
-            video_active = vdata.get("active_profile")
+            prof = vdata.get("active_profile")
+            unit = (vdata.get("units") or {}).get(prof) or {}
+            # Only a running encoder can hold the camera; a unit in auto-restart is failing, not holding it.
+            if prof and unit.get("ActiveState") == "active" and unit.get("SubState") == "running":
+                video_active = prof
         except Unavailable:
             pass
+        k = data.get("kernel_sensor")
+        if isinstance(k, dict) and not k.get("devices"):
+            video_active = None  # the kernel sees no sensor, so nothing can be holding it
         if video_active:
             return R(Status.UNKNOWN, f"לא זוהתה מצלמה בזמן ששירות הווידאו ({ltr(video_active)}) פעיל - "
                      "ייתכן שהמצלמה תפוסה. אין ראיה לכאן או לכאן.", observed="0 מצלמות", expected="IMX219 מזוהה",
