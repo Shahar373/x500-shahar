@@ -6,23 +6,31 @@ src/x500fs/
     status.py           PASS/WARN/FAIL/UNKNOWN/NOT_APPLICABLE, CheckResult, aggregate() → תוצאה כוללת
     observations.py     מאגר תצפיות thread-safe; מקור "live" או "simulation" בלבד (OriginMismatch)
     profile.py          פרופילי JSON (bench/flight), ולידציה, ספים "fc:PARAM", כללי expected_params
-    checks/             46 בדיקות: pi / link / fc / battery / video, + מנוע ההערכה (base.py)
+    checks/             53 בדיקות: pi / link / fc / battery / video, + מנוע ההערכה (base.py)
     mav/                קבועי MAVLink ופענוח טהור (sentinels → None)
     manual.py           רשימה ידנית (מתאפסת בכל סשן)
-    report.py, redact.py  דוח JSON/HTML, הסרת סודות
+    report.py, redact.py  דוח JSON/HTML, הסרת סודות והסתרת פרטים פרטיים (IP, ‏MAC, מספר סידורי, SSID)
     session.py          יומן סשן: ניתוקים, אירועים, RTT
     params.py           אילו פרמטרים נקראים (כולל שמות של 4.7)
   transport/            ← רשת, בלי Qt
     ssh.py              paramiko: אימות מפתח שרת, exec עם stdin וזמן קצוב, ping ‏(keepalive@openssh.com), מנהרה מקומית
     pi_link.py          SshManager (חיבור/התחברות מחדש/RTT), PiPoller (מריץ את ה-collector מעל SSH)
     streams.py          TCP / UDP / ערוץ SSH ‏(direct-tcpip)
-    mavlink_client.py   לקוח MAVLink לקריאה בלבד, עם רשימה סגורה של הודעות מותרות
+    mavlink_client.py   לקוח MAVLink לקריאה בלבד, עם רשימה סגורה של הודעות מותרות + מכונת מצבים לאבחון Pre-arm
+    pi_video.py         start/stop של x500-video@<profile> בלבד (sudo -n, רשימה סגורה), קריאת מצב בלי sudo
     mav_ingest.py       משותף ללקוח ולסימולציה: סינון sysid/compid, PARAM_VALUE, STATUSTEXT, COMMAND_ACK
   pi_side/              ← רץ על ה-Pi (stdlib בלבד)
     x500fs_collector.py תצפיות גולמיות כ-JSON בגרסה ‏x500fs.collector/1
-    x500fs_camera.py    מצב ושינוי זמני של נתיב ה-MediaMTX (רק מ-localhost)
-  sim/                  סימולציה (SimDrone) ו-autopilot מדומה על TCP (mock_mavlink)
-  video/worker.py       PyAV worker, ‏FPS, ניסיונות חיבור מחדש מוגבלים; SimVideoWorker
+    x500fs_diag.py      אבחון מפורש, קריאה בלבד, ל-stdout (במקום x500-diag שכותב קבצים)
+    x500fs_camera.py    מצב ושינוי זמני של נתיב ה-MediaMTX (חלופת RTSP, רק מ-localhost)
+  pi_tools/             ← רץ על ה-Pi עם ה-venv: x500-preflight / x500-status על אותו collector ואותן בדיקות
+  sim/                  סימולציה (SimDrone) ו-autopilot מדומה על TCP (mock_mavlink: 401, רחפן שני, STATUSTEXT מפוצל)
+  video/
+    worker.py           FfmpegWorker (תהליך FFmpeg: SRT caller / RTSP / קובץ), ‏FPS, ניסיונות מוגבלים; SimVideoWorker
+    ffmpeg_tools.py     איתור FFmpeg המצורף ובדיקת פרוטוקולים (srt)
+    pipeline.py         ארבעת המחוונים: שירות ב-Pi / מקודד / חיבור / תמונה במחשב
+    testsource.py       מקור SRT מקומי שמחקה את x500-video-run
+  diagnostics.py        ייצוא אבחון מפורש (מוסתר, נשמר במחשב)
   controller.py         תזמור (בלי Qt): חיבור, בדיקה, וידאו, דוח
   ui/                   PySide6, ‏RTL: main_window, checks_view, panels, video_view, dialogs
   settings.py           הגדרות JSON ב-%APPDATA%
@@ -56,6 +64,7 @@ src/x500fs/
 | Worker | זמנים קצובים | ביטול |
 |---|---|---|
 | SSH | connect/banner/auth: 10 שניות, ‏ping: 3 שניות, ‏keepalive: 5 שניות | `stop()` סוגר את ה-transport |
-| Pi collector | ‏exec: 45 שניות; כל פקודה ב-Pi: 3-12 שניות | `Event` |
+| Pi collector | ‏exec: 45 שניות; כל פקודה ב-Pi: 3-12 שניות; מחזור מהיר 10 שניות, איטי 60 שניות (וב"הרץ בדיקה") | `Event` |
 | MAVLink | קריאה: 0.2 שניות; התחברות מחדש בהמתנה גדלה עד 10 שניות | סגירת ה-stream |
-| וידאו | פתיחה: 8 שניות, קריאה: 3 שניות; עד 5 ניסיונות רצופים | `Event` (בדיקה בין פריימים) |
+| וידאו (FFmpeg) | פריים ראשון: 12 שניות, פריים חדש: 3 שניות (watchdog הורג את התהליך); עד 5 ניסיונות רצופים, המתנה עד 8 שניות | `Event` + הריגת התהליך |
+| שירות וידאו ב-Pi | כל פקודת SSH: 15 שניות; המתנה למצב active: ‏`service_start_wait_s` | — |

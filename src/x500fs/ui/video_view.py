@@ -155,6 +155,12 @@ class VideoPanel(QWidget):
         self._timer.start(250)
 
     def update_pipeline(self, snap, worker_status: dict | None, simulated: bool = False) -> None:
+        if worker_status and self._running:
+            self._status = worker_status  # keep FPS/resolution current between state-change callbacks
+            if worker_status.get("width"):
+                src = f" · מקור {worker_status['source_size']}" if worker_status.get("source_size") else ""
+                self.res_lbl.setText(f"רזולוציה: \u2066{worker_status['width']}x{worker_status['height']}\u2069 "
+                                     f"({worker_status.get('codec') or '?'}){src}")
         for key, (text, level) in pipeline_summary(snap, worker_status, simulated).items():
             lbl = self.pipe_lbls[key]
             lbl.setText(text)
