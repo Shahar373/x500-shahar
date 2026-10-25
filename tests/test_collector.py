@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from x500fs.pi_side import x500fs_collector as col
 
 COLLECTOR = Path(col.__file__)
@@ -249,6 +251,7 @@ def test_kernel_sensor_binding_from_sysfs(tmp_path, monkeypatch):
     assert acc["media_devices"] == 0 and acc["media_access"] is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fake Linux sysfs uses ':' in paths and symlinks")
 def test_usb_cameras_from_sysfs(tmp_path, monkeypatch):
     from test_pi_scripts import fake_uvc_camera
 
