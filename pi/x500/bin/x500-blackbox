@@ -21,6 +21,13 @@ RETENTION="${BLACKBOX_RETENTION_DAYS:-}"
 HEADER="timestamp,temp_c,throttled,ram_pct,disk_pct,load1,uplink,wifi_internet,lte_internet,tailscale,ground,video_profile,video_state,mavlink"
 
 case "$GROUND" in *NOT_CONFIGURED*) GROUND="" ;; esac
+# The period must be a positive whole number of seconds; anything else (10.5, 10s, empty)
+# would abort the shell arithmetic below and silently stop logging.
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [ "$((10#$INTERVAL))" -le 0 ]; then
+    echo "x500-blackbox: invalid BLACKBOX_INTERVAL '$INTERVAL' (expected a positive integer of seconds), using 10" >&2
+    INTERVAL=10
+fi
+INTERVAL=$((10#$INTERVAL))
 
 mkdir -p "$LOGDIR"
 

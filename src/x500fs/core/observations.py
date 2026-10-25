@@ -73,6 +73,10 @@ class ObservationStore:
         with self._lock:
             return self._data.get(key)
 
+    def remove(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+
     def remove_prefix(self, prefix: str) -> None:
         with self._lock:
             for k in [k for k in self._data if k.startswith(prefix)]:

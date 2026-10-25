@@ -63,6 +63,11 @@ def pipeline_summary(snap, worker_status: dict | None, simulated: bool = False) 
             text = f"{_ltr('x500-video@' + active)}: {_ltr(st)}"
             if restarts not in (None, "", "0"):
                 text += f" · הפעלות מחדש {_ltr(restarts)}"
+            source = data.get("source") if isinstance(data.get("source"), dict) else {}
+            if source.get("camera") == "usb":
+                text += " · מצלמת USB"
+            elif source.get("camera") == "csi":
+                text += " · מצלמת Pi"
             out["service"] = (text + f" · {fmt_age(age)}", OK if u.get("SubState") == "running" else WARN)
             prog = data.get("progress") or {}
             pa = prog.get("mtime_age_s")

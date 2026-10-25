@@ -88,8 +88,16 @@ class MainWindow(QMainWindow):
         self.act_report.triggered.connect(self._export_report)
         self.act_settings = QAction("הגדרות", self)
         self.act_settings.triggered.connect(self._open_settings)
-        for a in (self.act_connect, self.act_preflight, self.act_video, self.act_report, self.act_settings):
+        self.act_router = QAction("הפעל mavlink-router מחדש", self)
+        self.act_router.setToolTip("מוצג רק כש-systemd ב-Pi מדווח ש-mavlink-router נפל (failed/inactive).")
+        self.act_router.triggered.connect(self._restart_router)
+        self.act_router.setVisible(False)
+        for a in (self.act_connect, self.act_preflight, self.act_video, self.act_report, self.act_settings,
+                  self.act_router):
             tb.addAction(a)
+        btn = tb.widgetForAction(self.act_router)
+        if isinstance(btn, QToolButton):
+            btn.setObjectName("danger")
         btn = tb.widgetForAction(self.act_connect)
         if isinstance(btn, QToolButton):
             btn.setObjectName("primary")
@@ -141,8 +149,8 @@ class MainWindow(QMainWindow):
         self.manual = ManualPanel()
         self.manual.changed.connect(self._manual_changed)
         self.messages = MessagesPanel()
-        self.tabs.addTab(self.video, "מצלמה")
         self.tabs.addTab(self.telemetry, "טלמטריה")
+        self.tabs.addTab(self.video, "מצלמה")  # opened when video starts
         self.tabs.addTab(scrollable(self.manual), "רשימה ידנית")
         self.tabs.addTab(self.messages, "הודעות")
         split.addWidget(self.tabs)
@@ -217,6 +225,23 @@ class MainWindow(QMainWindow):
         self.ctl.stop_video()
         self.video.set_running(False)
         self.act_video.setText("הפעל וידאו")
+
+    def _restart_router(self) -> None:
+        gate = self.ctl.router_gate()
+        if not gate.allowed:
+            QMessageBox.information(self, "mavlink-router", gate.reason)
+            return
+        text = (f"systemd ב-Pi מדווח ש-mavlink-router נפל ({gate.reason}).\n\n"
+                "בלי mavlink-router אין קישור לבקר הטיסה (גם ל-Mission Planner), ולכן לא ניתן לוודא שהרחפן אינו חמוש.\n"
+                "האפליקציה תבדוק שוב את המצב ותשלח רק: sudo -n systemctl start mavlink-router.service "
+                "(ו-reset-failed אם נדרש). שירות שרץ לא ייפגע.\n\nלהפעיל מחדש?")
+        if QMessageBox.question(self, "הפעלת mavlink-router מחדש", text) != QMessageBox.Yes:
+            return
+        gate = self.ctl.restart_mavlink_router()
+        if not gate.allowed:
+            QMessageBox.information(self, "mavlink-router", gate.reason)
+        else:
+            self.statusBar().showMessage("מפעיל את mavlink-router מחדש…", 8000)
 
     def _on_frame(self) -> None:
         self.bridge.frame_consumed()
@@ -392,6 +417,7 @@ class MainWindow(QMainWindow):
         # buttons
         self.act_preflight.setEnabled(ctl.connected)
         self.act_video.setEnabled(ctl.connected)
+        self.act_router.setVisible(ctl.router_gate().allowed)
         self.act_connect.setText("נתק" if ctl.connected else ("התחבר לסימולציה" if ctl.settings.simulation else "התחבר"))
         # panels
         video = ctl.video_worker().status() if ctl.video_worker() else None

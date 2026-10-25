@@ -249,3 +249,123 @@ def test_live_srt_password_required_is_explained_not_bypassed(live):
     assert any("x500-video degraded" in t for _, t in rec.notices), rec.notices
     assert ctl.store.get("video.state").value["state"] == "failed"
     assert [c for c in sshd.commands if "sudo" in c] == ["sudo -n /usr/bin/systemctl start x500-video@degraded.service"]
+
+
+@pytest.mark.video
+def test_live_disconnect_stops_the_pi_service_this_app_started(live):
+    ctl, rec, sshd, ap = live
+    ff = network_ffmpeg()
+    port = free_udp_port()
+    state = _fake_video_service(sshd, port, ff)
+    _srt_settings(ctl, port, ff)
+    _connect(ctl, rec)
+    try:
+        assert ctl.start_video().allowed
+        assert wait(lambda: state["active"] == "degraded", 15)
+        t = ctl.disconnect()
+        t.join(25)
+        assert "sudo -n /usr/bin/systemctl stop x500-video@degraded.service" in sshd.commands, rec.notices
+        assert state["active"] is None
+    finally:
+        if state["src"]:
+            state["src"].stop()
+
+
+def test_live_stop_while_service_starts_undoes_the_start(live):
+    ctl, rec, sshd, ap = live
+    started = {"n": 0}
+    stopped = []
+
+    def show(m):
+        on = started["n"] > 0 and not stopped
+        return 0, (f"ActiveState={'active' if on else 'inactive'}\nSubState={'running' if on else 'dead'}\n"
+                   "MainPID=0\nNRestarts=0\n").encode(), b""
+
+    def control(m):
+        if m.group(1) == "start":
+            ctl.stop_video()             # the user presses "stop" while systemctl start is running
+            started["n"] += 1
+        else:
+            stopped.append(m.group(2))
+        return 0, b"", b""
+
+    sshd.handlers += [(re.compile(r"/usr/bin/systemctl show x500-video@(high|normal|degraded)\.service .*"), show),
+                      (SUDO_RE, control)]
+    _srt_settings(ctl, free_udp_port(), "ffmpeg")
+    _connect(ctl, rec)
+    assert ctl.start_video().allowed
+    assert wait(lambda: stopped == ["degraded"], 15), (sshd.commands, rec.notices)
+    assert ctl.video_worker() is None and ctl._video_service_started is None
+
+
+ROUTER_SUDO_RE = re.compile(r"sudo -n /usr/bin/systemctl (reset-failed|start) mavlink-router\.service")
+
+
+def test_router_restart_only_when_systemd_reports_it_down(live):
+    ctl, rec, sshd, ap = live
+    router = {"state": "active"}
+
+    def show(m):
+        st = router["state"]
+        return 0, (f"ActiveState={st}\nSubState={'running' if st == 'active' else 'dead'}\n"
+                   "MainPID=0\nNRestarts=0\nResult=success\n").encode(), b""
+
+    def control(m):
+        if m.group(1) == "start":
+            router["state"] = "active"
+        return 0, b"", b""
+
+    sshd.handlers[:0] = [(re.compile(r"/usr/bin/systemctl show mavlink-router(\.service)? .*"), show),
+                         (ROUTER_SUDO_RE, control)]
+    _connect(ctl, rec)
+    assert wait(lambda: ctl.store.get("pi.collector") is not None, 15)
+
+    def collector_says(state):
+        # the streamed collector runs on this test machine, so its systemd view is injected here
+        import copy
+        doc = copy.deepcopy(ctl.store.get("pi.collector").value)
+        doc["sections"]["services"]["data"]["units"]["mavlink-router"] = {"ActiveState": state, "SubState": "x"}
+        ctl.store.put("pi.collector", doc, "Pi collector", simulated=False)
+
+    collector_says("active")
+    gate = ctl.router_gate()
+    assert not gate.allowed and "לא מדווח כנפול" in gate.reason
+    assert ctl.restart_mavlink_router().allowed is False
+    assert not any("sudo" in c and "mavlink" in c for c in sshd.commands)
+    # systemd reports it failed: the button is offered and starts it (reset-failed first)
+    router["state"] = "failed"
+    collector_says("failed")
+    assert ctl.router_gate().allowed, ctl.router_gate().reason
+    assert ctl.restart_mavlink_router().allowed
+    assert wait(lambda: any("router" in t or "mavlink-router" in t for _, t in rec.notices), 15)
+    sudo = [c for c in sshd.commands if c.startswith("sudo")]
+    assert sudo == ["sudo -n /usr/bin/systemctl reset-failed mavlink-router.service",
+                    "sudo -n /usr/bin/systemctl start mavlink-router.service"], sudo
+    assert router["state"] == "active"
+
+
+def test_router_control_rechecks_state_before_sending():
+    from x500fs.transport.pi_router import RouterControl
+
+    class Res:
+        def __init__(self, out=b"", rc=0, err=b""):
+            self.stdout, self.exit_code, self.stderr = out, rc, err
+
+    class Sess:
+        def __init__(self, state):
+            self.state, self.cmds = state, []
+
+        def exec(self, cmd, timeout=None):
+            self.cmds.append(cmd)
+            if "show" in cmd:
+                return Res(f"ActiveState={self.state}\nSubState=x\n".encode())
+            if "start" in cmd:
+                return Res(rc=1, err=b"sudo: a password is required\n")
+            return Res()
+
+    s = Sess("active")  # the app's data said "down", but it is running now: nothing is sent
+    r = RouterControl(s).start_if_down()
+    assert not r.ok and not any("sudo" in c for c in s.cmds)
+    s = Sess("inactive")
+    r = RouterControl(s).start_if_down(wait_s=0.1)
+    assert not r.ok and r.needs_password and r.commands == ("sudo -n /usr/bin/systemctl start mavlink-router.service",)

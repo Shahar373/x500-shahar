@@ -157,3 +157,39 @@ def test_light_theme_even_when_windows_is_in_dark_mode(app):
         assert pal.color(role).lightness() < 80, role       # dark text
     for role in (QPalette.Window, QPalette.Base, QPalette.Button):
         assert pal.color(role).lightness() > 220, role      # light backgrounds
+
+
+def test_checks_problems_first_and_filter(app, tmp_path):
+    w = _window(tmp_path)
+    w.show()
+    w.ctl.connect()
+    pump(app, 2.0)
+    w.refresh()
+    cv = w.checks
+    root = cv.tree.invisibleRootItem()
+    order = ["FAIL", "UNKNOWN", "WARN", "PASS", "NOT_APPLICABLE"]
+    cats = [root.child(i).text(0) for i in range(root.childCount())]
+    assert [order.index(c) for c in cats] == sorted(order.index(c) for c in cats)
+    healthy = [root.child(i) for i in range(root.childCount()) if root.child(i).text(0) in ("PASS", "NOT_APPLICABLE")]
+    assert healthy and not any(c.isExpanded() for c in healthy)
+    cv.btn_problems.click()
+    visible = [it for cid, it in cv._items.items() if not it.isHidden() and not it.parent().isHidden()]
+    assert visible and all(cv._results[it.data(0, 0x0100)].status.value in ("FAIL", "UNKNOWN", "WARN")
+                           for it in visible)
+    cv.btn_all.click()
+    assert not any(it.isHidden() for it in cv._items.values())
+    w.ctl.disconnect()
+    w.close()
+
+
+def test_video_panel_is_compact_while_off(app, tmp_path):
+    w = _window(tmp_path)
+    w.show()
+    pump(app, 0.2)
+    assert w.tabs.currentWidget() is w.telemetry
+    assert not w.video.details.isVisible()
+    w.video.set_running(True)
+    assert w.video.details.isVisibleTo(w.video) and not w.video.idle_lbl.isVisibleTo(w.video)
+    w.video.set_running(False)
+    assert not w.video.details.isVisibleTo(w.video)
+    w.close()

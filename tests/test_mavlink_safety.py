@@ -153,3 +153,30 @@ def test_malformed_bytes_counted_not_fatal():
     ing.handle({"no": "type"}, 1, 1)
     ing.handle({"mavpackettype": "PARAM_VALUE", "param_id": None}, 1, 1)
     assert ing.bad_packets == 2  # param from unknown target is ignored, not counted
+
+
+def test_udp_listen_accepts_only_one_sender():
+    import socket
+
+    from x500fs.transport.streams import UdpListenStream
+
+    st = UdpListenStream(0, bind="127.0.0.1", read_timeout=1.0)
+    port = st._sock.getsockname()[1]
+    router = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    router.bind(("127.0.0.1", 0))
+    router.sendto(b"vehicle", ("127.0.0.1", port))
+    assert st.recv(4096) == b"vehicle" and st.allowed_ip == "127.0.0.1"
+    st.close()
+    router.close()
+    # a pinned address: datagrams from anyone else are dropped and counted, never answered
+    st = UdpListenStream(0, bind="127.0.0.1", read_timeout=1.0, allowed_peer="192.0.2.7")
+    port = st._sock.getsockname()[1]
+    spoof = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    spoof.sendto(b"fake heartbeat", ("127.0.0.1", port))
+    assert st.recv(4096) is None and st.rejected == 1 and st.rejected_from == {"127.0.0.1"}
+    st.send(b"request")  # no peer was accepted, so nothing is sent to the spoofer
+    spoof.settimeout(0.3)
+    with pytest.raises(socket.timeout):
+        spoof.recvfrom(100)
+    st.close()
+    spoof.close()

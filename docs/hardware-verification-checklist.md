@@ -65,6 +65,10 @@
 - [ ] ניתוק Wi-Fi/Tailscale באמצע → "תמונה ישנה" תוך כ-2 שניות, ניסיונות חיבור מחדש מוגבלים; אחרי שהשירות מופעל מחדש (‏`RestartSec=3`) התמונה חוזרת
 - [ ] הפעלת וידאו או החלפת פרופיל נחסמת כשהרחפן חמוש, וכשאין HEARTBEAT
 - [ ] "עצור וידאו" עוצר את השירות ב-Pi רק אם האפליקציה הפעילה אותו
+- [ ] מצלמת USB ‏(Logitech C270): `v4l2-ctl --list-devices` מראה אותה; `v4l2-ctl -d /dev/video0 --list-formats-ext` כולל MJPG ‏640×480 ב-30/20 FPS
+- [ ] עם C270 מחוברת ו-`CAMERA=auto`: ‏`journalctl -u x500-video@degraded` מראה `Camera: usb`, יש תמונה חיה, ו-`pi.camera` עובר גם בלי IMX219
+- [ ] ניתוק ה-C270 תוך כדי זרם: השירות עולה מחדש עם `Camera: csi`, והתמונה חוזרת ממצלמת ה-Pi
+- [ ] CPU וטמפרטורה עם C270 ב-degraded ו-normal (פענוח MJPEG ב-Pi), לפני שימוש בטיסה
 
 ## Windows
 
@@ -73,3 +77,12 @@
 - [ ] גופן עברי ו-RTL נכונים ב-Windows (Segoe UI)
 - [ ] הסיסמה/passphrase נשמרים במנהל האישורים (Credential Manager → Windows Credentials → ‏`X500FlightStation`)
 - [ ] הסרת ההתקנה משאירה את `%APPDATA%\X500FlightStation`
+
+## mavlink-router והממשק
+
+- [ ] `sudo systemctl stop mavlink-router` (על הספסל, Mission Planner מנותק): תוך מחזור איסוף אחד מופיע הכפתור האדום "הפעל mavlink-router מחדש"
+- [ ] בלי `install_video_sudoers.sh --router`: הלחיצה מסבירה שנדרשת סיסמה ולא שולחת כלום נוסף. אחרי `--router --apply`: ה-router עולה, MAVLink חוזר ל-live והכפתור נעלם
+- [ ] כש-mavlink-router רץ הכפתור לא מוצג בכלל
+- [ ] MAVLink ב-UDP עם "לקבל רק מכתובת" = כתובת ה-Pi: נתונים מגיעים; עם כתובת שגויה - אין נתונים
+- [ ] על מסך Windows אמיתי: "רק בעיות" ברשימת הבדיקות, קטגוריות תקינות מקופלות, לשונית המצלמה קטנה כשהווידאו כבוי
+

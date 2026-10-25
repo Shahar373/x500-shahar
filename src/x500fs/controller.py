@@ -33,6 +33,8 @@ from .transport.mavlink_client import MavConfig, MavlinkClient
 from .transport.pi_link import PiPoller, SshManager
 from .transport.ssh import HostKeyUnknown, KnownHosts, LocalForwarder, SshAuth, SshError
 from .transport.streams import SshChannelStream, TcpStream, UdpListenStream
+from .transport.pi_router import RouterControl, is_down
+from .transport.pi_router import password_help as router_password_help
 from .transport.pi_video import PiVideoControl, password_help
 from .video.worker import FfmpegWorker, SimVideoWorker, rtsp_source, srt_source
 
@@ -76,6 +78,9 @@ class Controller:
         self._forwarder: LocalForwarder | None = None
         self._pending_hostkey: HostKeyUnknown | None = None
         self._lock = threading.Lock()
+        self._video_lock = threading.Lock()  # _video, _video_service_started, _forwarder, _video_start_thread
+        self._video_start_thread: threading.Thread | None = None
+        self._router_busy = False
         self.preflight_started: float | None = None
         self.camera_info: dict | None = None
         self._video_service_started: str | None = None  # profile this app started on the Pi
@@ -243,7 +248,16 @@ class Controller:
         if m.transport == "tcp":
             return lambda: TcpStream(m.tcp_host or self.settings.connection.host, m.tcp_port)
         if m.transport == "udp_listen":
-            return lambda: UdpListenStream(m.udp_port)
+            udp = {"ip": m.udp_allowed_peer, "stream": None}
+
+            def udp_factory():
+                # Keep the first sender's address across reconnects, so a reconnect is not a new race.
+                if udp["stream"] is not None and udp["stream"].allowed_ip:
+                    udp["ip"] = udp["stream"].allowed_ip
+                udp["stream"] = UdpListenStream(m.udp_port, allowed_peer=udp["ip"])
+                return udp["stream"]
+            return udp_factory.stream
+            return udp_factory
 
         def factory():
             ssh = self._ssh.wait_session(timeout=5.0)
@@ -281,29 +295,36 @@ class Controller:
         c = self.settings.connection
         return self.known_hosts().forget(c.host, c.ssh_port)
 
-    def disconnect(self) -> None:
+    def disconnect(self) -> threading.Thread | None:
+        """Returns the background teardown thread (None when not connected)."""
         if not self.connected:
-            return
+            return None
+        # Stop video while still connected: stopping the Pi service this app started needs the
+        # disarmed check and the SSH session, both of which go away below.
+        video_stop = self.stop_video()
         self.connected = False
-        self.stop_video()
         workers = [w for w in (self._sim, self._mav, self._poller, self._ssh) if w is not None]
         self._sim = self._mav = self._poller = self._ssh = None
-        if self._forwarder:
-            self._forwarder.stop()
-            self._forwarder = None
 
         def _stop_all():
+            if video_stop is not None:
+                video_stop.join(20.0)
             for w in workers:
                 try:
                     w.stop()
                 except Exception:  # noqa: BLE001
                     log.exception("stop failed")
-        threading.Thread(target=_stop_all, name="disconnect", daemon=True).start()
+        t = threading.Thread(target=_stop_all, name="disconnect", daemon=True)
+        t.start()
         self.session.event("info", "app", "נותק לבקשת המשתמש")
         self.listener.on_connection_changed()
+        return t
 
-    def shutdown(self) -> None:
-        self.disconnect()
+    def shutdown(self, timeout: float = 15.0) -> None:
+        """App exit: wait (bounded) for the teardown, so a Pi service this app started is stopped."""
+        t = self.disconnect()
+        if t is not None:
+            t.join(timeout)
 
     # ------------------------------------------------------------------ preflight
     def run_preflight(self) -> None:
@@ -384,6 +405,10 @@ class Controller:
 
     def evaluate(self):
         self._sample_video_performance()
+        w = self._video
+        if w is not None and w.state != "stopped":
+            # The worker reports only state changes; the frame age and FPS move on every frame.
+            self._on_video_status(w.status(), notify=False)
         ctx = Ctx(self.store.snapshot(), self.profile, self.drone_config(), self.session)
         results = evaluate(ctx)
         return results, aggregate(results), ctx.snap
@@ -415,6 +440,59 @@ class Controller:
             return CameraGate(False, "הרחפן חמוש. הפעלה או שינוי הגדרות מצלמה מותרים רק כשהוא לא חמוש.")
         return CameraGate(True, "")
 
+    # ------------------------------------------------------------------ mavlink-router
+    ROUTER_STATE_MAX_AGE_S = 20.0
+
+    def router_gate(self) -> CameraGate:
+        """The router restart is offered only when fresh Pi data shows systemd has it down."""
+        if not self.connected or self.simulation or self._ssh is None:
+            return CameraGate(False, "יש להתחבר ל-Pi אמיתי")
+        if self._router_busy:
+            return CameraGate(False, "הפעלה מחדש כבר מתבצעת")
+        col = self.store.get("pi.collector")
+        if col is None or col.age(time.monotonic()) > self.ROUTER_STATE_MAX_AGE_S:
+            return CameraGate(False, "אין נתונים עדכניים מה-Pi על מצב mavlink-router")
+        unit = self.settings.pi.services.get("mavlink_router") or "mavlink-router"
+        try:
+            st = col.value["sections"]["services"]["data"]["units"].get(unit)
+        except (KeyError, TypeError, AttributeError):
+            st = None
+        if not is_down(st):
+            return CameraGate(False, "mavlink-router לא מדווח כנפול")
+        return CameraGate(True, f"mavlink-router {st.get('ActiveState')}/{st.get('SubState')}")
+
+    def restart_mavlink_router(self) -> CameraGate:
+        """Explicit user action (after a confirmation dialog). Runs in the background."""
+        gate = self.router_gate()
+        if not gate.allowed:
+            return gate
+        self._router_busy = True
+        ssh_mgr = self._ssh
+
+        def work():
+            try:
+                ssh = ssh_mgr.wait_session(5.0)
+                if ssh is None:
+                    raise SshError("SSH not connected")
+                res = RouterControl(ssh).start_if_down()  # re-reads the state before sending anything
+            except Exception as e:  # noqa: BLE001
+                self.listener.on_notice("warning", f"הפעלת mavlink-router מחדש נכשלה: {type(e).__name__}: {e}")
+                return
+            finally:
+                self._router_busy = False
+            for cmd in res.commands:
+                self.session.event("info", "pi", f"פקודה מפורשת ב-Pi: {cmd}")
+            if res.ok:
+                self.session.event("info", "pi", "mavlink-router הופעל מחדש (פעולה מפורשת)")
+                self.listener.on_notice("info", res.message)
+                if self._poller:
+                    self._poller.refresh()
+            else:
+                self.session.event("warning", "pi", f"הפעלת mavlink-router נכשלה: {res.message}")
+                self.listener.on_notice("warning", router_password_help() if res.needs_password else res.message)
+        threading.Thread(target=work, name="router-start", daemon=True).start()
+        return gate
+
     # ------------------------------------------------------------------ video
     def video_running(self) -> bool:
         return self._video is not None
@@ -424,6 +502,10 @@ class Controller:
         gate = self.camera_gate()
         if not gate.allowed or self._video is not None:
             return gate
+        with self._video_lock:
+            return self._start_video_locked(gate)
+
+    def _start_video_locked(self, gate: CameraGate) -> CameraGate:
         v = self.settings.video
         common = dict(on_status=self._on_video_status, on_frame=self.listener.on_video_frame,
                       stale_after_s=v.stale_after_s)
@@ -445,15 +527,19 @@ class Controller:
             self._video = worker
 
             def _prepare_and_start():
-                if v.manage_pi_service and not self._ensure_pi_video_service(v.srt_profile):
-                    if self._video is worker:
+                if v.manage_pi_service and not self._ensure_pi_video_service(v.srt_profile, worker):
+                    with self._video_lock:
+                        if self._video is not worker:
+                            return
                         self._video = None
-                        self._on_video_status({**worker.status(), "state": "failed",
-                                               "error": "שירות הווידאו ב-Pi לא הופעל"})
+                    self._on_video_status({**worker.status(), "state": "failed",
+                                           "error": "שירות הווידאו ב-Pi לא הופעל"})
                     return
-                if self._video is worker:
-                    worker.start()
-            threading.Thread(target=_prepare_and_start, name="video-start", daemon=True).start()
+                with self._video_lock:
+                    if self._video is worker:
+                        worker.start()
+            self._video_start_thread = threading.Thread(target=_prepare_and_start, name="video-start", daemon=True)
+            self._video_start_thread.start()
             return gate
         worker = FfmpegWorker(self._rtsp_source, width=v.width, height=v.height, ffmpeg_path=v.ffmpeg_path,
                               open_timeout_s=v.open_timeout_s, max_reconnects=v.max_reconnects,
@@ -463,9 +549,11 @@ class Controller:
         def _prepare_and_start_rtsp():
             if v.apply_camera_settings:
                 self._configure_camera()
-            if self._video is worker:
-                worker.start()
-        threading.Thread(target=_prepare_and_start_rtsp, name="video-start", daemon=True).start()
+            with self._video_lock:
+                if self._video is worker:
+                    worker.start()
+        self._video_start_thread = threading.Thread(target=_prepare_and_start_rtsp, name="video-start", daemon=True)
+        self._video_start_thread.start()
         return gate
 
     # -- SRT (existing Pi pipeline) -------------------------------------
@@ -492,7 +580,7 @@ class Controller:
                                        "message": message[:300]})
         del self.video_service_log[:-50]
 
-    def _ensure_pi_video_service(self, profile: str) -> bool:
+    def _ensure_pi_video_service(self, profile: str, worker) -> bool:
         """Start x500-video@<profile> if needed (allowlisted sudo -n systemctl). True when it runs."""
         try:
             ssh = self._ssh.wait_session(5.0) if self._ssh else None
@@ -528,8 +616,17 @@ class Controller:
                                     f"הפעלת שירות הווידאו ב-Pi נכשלה: {res.message}")
             self.session.event("warning", "video", f"הפעלת x500-video@{profile} נכשלה: {res.message}")
             return False
-        self._video_service_started = profile
         self.session.event("info", "video", f"שירות הווידאו x500-video@{profile} הופעל ב-Pi (פעולה מפורשת)")
+        with self._video_lock:
+            still_wanted = self._video is worker
+            if still_wanted:
+                self._video_service_started = profile
+        if not still_wanted:
+            # "stop video" was pressed while the service was starting: undo what this app started.
+            gate, ssh_mgr = getattr(worker, "stop_ctx", None) or (self.camera_gate(), self._ssh)
+            if self.settings.video.stop_pi_service_on_stop:
+                self._stop_pi_video_service(profile, gate, ssh_mgr)
+            return False
         deadline = time.monotonic() + max(1.0, self.settings.video.service_start_wait_s)
         while time.monotonic() < deadline:
             try:
@@ -542,14 +639,14 @@ class Controller:
         self.listener.on_notice("warning", f"x500-video@{profile} לא הגיע למצב פעיל. בדוק את יומן השירות ב-Pi.")
         return False
 
-    def _stop_pi_video_service(self, profile: str) -> None:
-        gate = self.camera_gate()
+    def _stop_pi_video_service(self, profile: str, gate: CameraGate, ssh_mgr: SshManager | None) -> None:
+        """gate and ssh_mgr are taken when the stop was requested (a disconnect tears both down)."""
         if not gate.allowed:
             self.listener.on_notice("warning", "הצפייה נעצרה במחשב, אבל שירות הווידאו ב-Pi נשאר פועל: " + gate.reason)
             self._video_log("stop", profile, False, "not stopped: " + gate.reason)
             return
         try:
-            ssh = self._ssh.wait_session(5.0) if self._ssh else None
+            ssh = ssh_mgr.wait_session(5.0) if ssh_mgr else None
             if ssh is None:
                 raise SshError("SSH not connected")
             res = PiVideoControl(ssh, self.settings.video.unit_template).stop(profile)
@@ -573,13 +670,17 @@ class Controller:
         if v.direct_url:
             return v.direct_url
         if v.transport == "ssh_tunnel":
-            if self._forwarder is None:
-                if self._ssh is None:
-                    raise SshError("SSH not running")
-                fw = LocalForwarder(lambda: self._ssh.wait_session(5.0), "127.0.0.1", v.rtsp_port)
-                fw.start()
-                self._forwarder = fw
-            return f"rtsp://127.0.0.1:{self._forwarder.port}/{v.path}"
+            with self._video_lock:  # called from the worker thread; never outlive stop_video()
+                if self._video is None:
+                    raise RuntimeError("video stopped")
+                if self._forwarder is None:
+                    ssh_mgr = self._ssh
+                    if ssh_mgr is None:
+                        raise SshError("SSH not running")
+                    fw = LocalForwarder(lambda: ssh_mgr.wait_session(5.0), "127.0.0.1", v.rtsp_port)
+                    fw.start()
+                    self._forwarder = fw
+                return f"rtsp://127.0.0.1:{self._forwarder.port}/{v.path}"
         return f"rtsp://{self.settings.connection.host}:{v.rtsp_port}/{v.path}"
 
     def _configure_camera(self) -> None:
@@ -617,37 +718,48 @@ class Controller:
         else:
             self.session.link_down("video", reason)
 
-    def _on_video_status(self, st: dict) -> None:
+    def _on_video_status(self, st: dict, notify: bool = True) -> None:
         try:
             self.store.put("video.state", st, "video", simulated=self.store.simulated)
         except Exception:  # noqa: BLE001
             pass
-        self.listener.on_video_status(st)
+        if notify:
+            self.listener.on_video_status(st)
 
-    def stop_video(self) -> None:
-        w = self._video
-        self._video = None
+    def stop_video(self) -> threading.Thread | None:
+        """Returns the background stop thread (None when no video was running)."""
+        v = self.settings.video
+        may_stop_service = not self.simulation and v.manage_pi_service and v.stop_pi_service_on_stop
+        with self._video_lock:
+            w = self._video
+            self._video = None
+            started, self._video_service_started = self._video_service_started, None
+            fw, self._forwarder = self._forwarder, None
+            start_t, self._video_start_thread = self._video_start_thread, None
+            if w is not None and may_stop_service:
+                # Disarmed check and SSH as of this request: a start still in flight uses them to undo itself.
+                w.stop_ctx = (self.camera_gate(), self._ssh)
+        if fw:
+            fw.stop()
         if w is None:
-            return
+            return None
         try:
             self.store.put("video.state", {"state": "stopped"}, "video", simulated=self.store.simulated)
         except Exception:  # noqa: BLE001
             pass
         self.session.link_up("video")  # an explicit stop is not an interruption
-        started, self._video_service_started = self._video_service_started, None
-        v = self.settings.video
         if self._sim:
             self._sim.video_profile = None
 
         def _stop():
+            if start_t is not None and start_t is not threading.current_thread():
+                start_t.join(v.service_start_wait_s + 30)
             w.stop()
-            if started and not self.simulation and v.manage_pi_service and v.stop_pi_service_on_stop:
-                self._stop_pi_video_service(started)
-        threading.Thread(target=_stop, name="video-stop", daemon=True).start()
-        fw = self._forwarder
-        self._forwarder = None
-        if fw:
-            fw.stop()
+            if started and may_stop_service:
+                self._stop_pi_video_service(started, *w.stop_ctx)
+        t = threading.Thread(target=_stop, name="video-stop", daemon=True)
+        t.start()
+        return t
 
     def video_worker(self):
         return self._video

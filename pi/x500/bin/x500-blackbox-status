@@ -20,6 +20,12 @@ C.ROOT = os.environ.get("X500FS_ROOT", "/")  # test hook
 CONF = os.environ.get("X500_CONF", "/etc/x500/x500.conf")
 
 
+def blackbox_interval(raw) -> float:
+    """Same rule as x500-blackbox: a positive whole number of seconds, else 10."""
+    raw = (raw or "").strip()
+    return float(int(raw)) if raw.isascii() and raw.isdigit() and int(raw) > 0 else 10.0
+
+
 def main():
     conf = {}
     try:
@@ -28,7 +34,7 @@ def main():
     except OSError:
         pass
     logdir = conf.get("BLACKBOX_DIR") or "/var/log/x500/blackbox"
-    interval = float(conf.get("BLACKBOX_INTERVAL") or 10)
+    interval = blackbox_interval(conf.get("BLACKBOX_INTERVAL"))
     retention = conf.get("BLACKBOX_RETENTION_DAYS") or ""
     cfg = dict(C.DEFAULT_CONFIG)
     cfg["blackbox_globs"] = [logdir.rstrip("/") + "/x500-blackbox-*.csv"]

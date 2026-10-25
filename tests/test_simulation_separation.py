@@ -78,3 +78,25 @@ def test_manual_checklist_resets_each_preflight(tmp_path):
         assert ctl.manual.done_count() == 0
     finally:
         ctl.disconnect()
+
+
+def test_video_check_passes_while_simulated_video_plays(tmp_path):
+    # Regression: video.state was only written on state changes, so the frame age froze and the
+    # check reported "no new frames" two seconds into live video.
+    store = SettingsStore(tmp_path)
+    s = store.load()
+    s.simulation = True
+    store.save(s)
+    ctl = Controller(store, Listener())
+    ctl.connect()
+    try:
+        deadline = time.monotonic() + 10
+        while not ctl.camera_gate().allowed and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert ctl.start_video().allowed
+        time.sleep(3.5)
+        results, _, _ = ctl.evaluate()
+        r = next(r for r in results if r.check_id == "video.stream")
+        assert r.status.value == "PASS", (r.status, r.explanation, r.observed)
+    finally:
+        ctl.disconnect()

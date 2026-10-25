@@ -19,6 +19,8 @@ from ..core.observations import ObservationStore
 from ..core.session import SessionLog
 
 TextCallback = Callable[[dict], None]
+CHUNK_MAX_AGE_S = 2.0   # an unfinished chunked STATUSTEXT older than this is dropped
+CHUNK_MAX_IDS = 16      # at most this many messages are reassembled at once
 
 
 class MavIngest:
@@ -48,6 +50,7 @@ class MavIngest:
         self._lock = threading.Lock()
         self._prearm = deque(maxlen=50)
         self._chunks: dict[int, dict[int, str]] = {}
+        self._chunk_t: dict[int, float] = {}  # id -> t_mono of its first chunk
         self.acks: deque = deque(maxlen=50)
         self._ack_event = threading.Event()
         self.connected = False
@@ -116,7 +119,7 @@ class MavIngest:
                 "value": value, "type": d.get("param_type"),
                 "index": d.get("param_index"), "count": d.get("param_count"),
             }, t_mono)
-            self.store.remove_prefix(f"mav.param_missing.{name}")
+            self.store.remove(f"mav.param_missing.{name}")
             return
         if mtype == "STATUSTEXT":
             self._handle_text(d, t_mono)
@@ -184,11 +187,23 @@ class MavIngest:
         if st["id"]:
             # MAVLink2 chunked STATUSTEXT: chunks share an id and carry chunk_seq; the
             # last one is shorter than 50 characters. Reassemble in chunk_seq order.
+            # Unfinished messages expire, so a later message reusing the id never
+            # merges with stale chunks.
+            for k in [k for k, t0 in self._chunk_t.items() if t_mono - t0 > CHUNK_MAX_AGE_S]:
+                self._chunks.pop(k, None)
+                self._chunk_t.pop(k, None)
+            if st["id"] not in self._chunks:
+                while len(self._chunks) >= CHUNK_MAX_IDS:
+                    oldest = min(self._chunk_t, key=self._chunk_t.get)
+                    self._chunks.pop(oldest, None)
+                    self._chunk_t.pop(oldest, None)
+                self._chunk_t[st["id"]] = t_mono
             parts = self._chunks.setdefault(st["id"], {})
             parts[st["chunk_seq"]] = text
             if len(text) >= 50 and len(parts) < 20:
                 return
             chunks = self._chunks.pop(st["id"], {})
+            self._chunk_t.pop(st["id"], None)
             text = "".join(chunks[k] for k in sorted(chunks))
         item = {
             "t_wall": time.time(),
