@@ -7,6 +7,9 @@ from pymavlink.dialects.v20 import ardupilotmega as m
 
 from x500fs.core.mav import constants as C
 from x500fs.core.mav import parse as P
+from x500fs.core.observations import ObservationStore
+from x500fs.core.session import SessionLog
+from x500fs.transport.mav_ingest import MavIngest
 
 
 def test_sensor_bits_match_pymavlink():
@@ -107,3 +110,43 @@ def test_arming_check_decode():
 def test_home_position_unset():
     assert P.home_position({"latitude": 0, "longitude": 0}) is None
     assert P.home_position({"latitude": 320000000, "longitude": 348000000, "altitude": 1000})["lat"] == 32.0
+
+
+def _ingest(texts=None):
+    store = ObservationStore(False)
+    ing = MavIngest(store, SessionLog(), simulated=False, endpoint="t", target_sysid=1,
+                    on_text=(texts.append if texts is not None else None))
+    return ing, store
+
+
+def test_param_value_clears_only_its_own_missing_marker():
+    ing, store = _ingest()
+    for name in ("RTL_ALT", "RTL_ALT_M", "MAV_GCS_SYSID", "MAV_GCS_SYSID_HI"):
+        ing.mark_param_missing(name)
+    for name in ("RTL_ALT", "MAV_GCS_SYSID"):
+        ing.handle({"mavpackettype": "PARAM_VALUE", "param_id": name, "param_value": 1.0, "param_type": 9,
+                    "param_index": 0, "param_count": 1}, 1, C.MAV_COMP_ID_AUTOPILOT1, t_mono=1.0)
+    assert store.get("mav.param_missing.RTL_ALT") is None
+    assert store.get("mav.param_missing.MAV_GCS_SYSID") is None
+    assert store.get("mav.param_missing.RTL_ALT_M") is not None
+    assert store.get("mav.param_missing.MAV_GCS_SYSID_HI") is not None
+
+
+def _text(ing, text, mid, seq, t):
+    ing.handle({"mavpackettype": "STATUSTEXT", "severity": 6, "text": text, "id": mid, "chunk_seq": seq},
+               1, C.MAV_COMP_ID_AUTOPILOT1, t_mono=t)
+
+
+def test_statustext_stale_chunks_expire_and_never_merge_with_reused_id():
+    texts = []
+    ing, _ = _ingest(texts)
+    _text(ing, "A" * 50, 7, 0, 10.0)              # first chunk; the rest never arrives
+    _text(ing, "B" * 50, 7, 0, 20.0)              # id 7 reused much later
+    _text(ing, "end", 7, 1, 20.1)
+    assert [t["text"] for t in texts] == ["B" * 50 + "end"]
+    _text(ing, "ok" * 25, 8, 0, 21.0)             # chunks within the window still reassemble
+    _text(ing, "!", 8, 1, 22.5)
+    assert texts[-1]["text"] == "ok" * 25 + "!"
+    for i in range(100):                          # unfinished messages are capped
+        _text(ing, "X" * 50, 100 + i, 0, 30.0)
+    assert len(ing._chunks) <= 16 and len(ing._chunk_t) == len(ing._chunks)

@@ -42,6 +42,7 @@ QToolButton:hover { background: #eef3f8; }
 QToolButton:disabled { color: #9aa0a6; background: #f3f5f7; }
 QToolButton#primary { background: #1f6feb; color: white; border-color: #1f6feb; font-weight: 600; }
 QToolButton#primary:disabled { background: #9fbef0; border-color: #9fbef0; }
+QToolButton#danger { background: #c62828; color: white; border-color: #c62828; font-weight: 600; }
 QFrame#card { background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; }
 QLabel#cardTitle { color: #5f6b7a; font-size: 12px; }
 QLabel#cardValue { font-size: 16px; font-weight: 700; }

@@ -8,13 +8,18 @@ import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
-from PySide6.QtWidgets import QHeaderView, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSplitter, QTextBrowser, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
+)
 
 from ..core.checks.base import CATEGORIES, CATEGORY_ORDER, fmt_age
 from ..core.status import CheckResult
 from .style import STATUS_COLORS, STATUS_HE, badge_html
 
 COLS = ["סטטוס", "בדיקה", "נצפה", "צפוי", "מקור", "גיל"]
+HIDDEN_COLS = (3, 4)  # expected value and source are in the details pane, not in every row
+PROBLEMS = ("FAIL", "UNKNOWN", "WARN")
 _HEBREW = re.compile("[\u0590-\u05FF]")
 
 
@@ -58,8 +63,31 @@ class ChecksView(QWidget):
         self._cats: dict[str, QTreeWidgetItem] = {}
         self._items: dict[str, QTreeWidgetItem] = {}
         self._results: dict[str, CheckResult] = {}
+        for col in HIDDEN_COLS:
+            self.tree.setColumnHidden(col, True)
         self.tree.currentItemChanged.connect(self._show_details)
-        self.details.setHtml("<p style='color:#5f6b7a'>בחר בדיקה כדי לראות הסבר, ראיות ומגבלות.</p>")
+        self.details.setHtml("<p style='color:#5f6b7a'>בחר בדיקה כדי לראות הסבר, ערך צפוי, מקור וראיות.</p>")
+        # filter bar: problems first, and optionally only problems
+        self.btn_all = QPushButton("הכל")
+        self.btn_problems = QPushButton("רק בעיות")
+        self.filter_group = QButtonGroup(self)
+        for b in (self.btn_all, self.btn_problems):
+            b.setCheckable(True)
+            b.setFlat(True)
+            self.filter_group.addButton(b)
+        self.btn_all.setChecked(True)
+        self.filter_group.buttonClicked.connect(lambda _b: self._apply_filter())
+        self.summary = QLabel("")
+        self.summary.setObjectName("cardTitle")
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 4)
+        bar.addWidget(QLabel("הצג:"))
+        bar.addWidget(self.btn_all)
+        bar.addWidget(self.btn_problems)
+        bar.addStretch(1)
+        bar.addWidget(self.summary)
+        lay.insertLayout(0, bar)
+        self._cat_worst: dict[str, str] = {}
 
     def update_results(self, results: list[CheckResult]) -> None:
         bold = QFont()
@@ -87,7 +115,12 @@ class ChecksView(QWidget):
             parent.setForeground(0, QBrush(QColor(STATUS_COLORS[worst])))
             parent.setFont(0, bold)
             parent.setText(1, CATEGORIES[cat])
-            parent.setText(2, " · ".join(f"{STATUS_HE[k]} {v}" for k, v in counts.items()))
+            parent.setText(2, " · ".join(f"{STATUS_HE[k]} {counts[k]}" for k in _ORDER if k in counts))
+            if self._cat_worst.get(cat) != worst:
+                # open categories with a problem, fold healthy ones (the user can still open them)
+                parent.setExpanded(worst in PROBLEMS)
+                self._cat_worst[cat] = worst
+            rows = sorted(rows, key=lambda r: (_ORDER.index(r.status.value), not r.critical))
             for r in rows:
                 item = self._items.get(r.check_id)
                 if item is None:
@@ -107,9 +140,52 @@ class ChecksView(QWidget):
                 item.setText(4, bidi(r.source))
                 item.setToolTip(4, r.source)
                 item.setText(5, bidi(fmt_age(r.age_s)))
+            self._reorder(parent, [self._items[r.check_id] for r in rows])
+        self._reorder(self.tree.invisibleRootItem(),
+                      sorted(self._cats.values(), key=lambda it: (_ORDER.index(it.text(0)),
+                                                                   CATEGORY_ORDER.index(self._cat_of(it)))))
+        problems = sum(1 for r in self._results.values() if r.status.value in PROBLEMS)
+        self.btn_problems.setText(f"רק בעיות ({problems})")
+        fails = sum(1 for r in self._results.values() if r.status.value == "FAIL")
+        self.summary.setText(f"נכשלו {fails}" if fails else ("אין כשלים" if self._results else ""))
+        self._apply_filter()
         cur = self.tree.currentItem()
         if cur is not None:
             self._show_details(cur, None)
+
+    def _cat_of(self, item: QTreeWidgetItem) -> str:
+        return next(c for c, it in self._cats.items() if it is item)
+
+    def _reorder(self, parent: QTreeWidgetItem, want: list[QTreeWidgetItem]) -> None:
+        """Move children into the wanted order only when it changed (keeps selection and scrolling)."""
+        have = [parent.child(i) for i in range(parent.childCount())]
+        if have == want:
+            return
+        cur = self.tree.currentItem()
+        expanded = {id(it): it.isExpanded() for it in want}
+        parent.takeChildren()
+        parent.addChildren(want)
+        for it in want:
+            it.setExpanded(expanded[id(it)])
+        if cur is not None:
+            self.tree.setCurrentItem(cur)
+
+    def problems_only(self) -> bool:
+        return self.btn_problems.isChecked()
+
+    def _apply_filter(self) -> None:
+        only = self.problems_only()
+        for cat, parent in self._cats.items():
+            visible = 0
+            for i in range(parent.childCount()):
+                item = parent.child(i)
+                r = self._results.get(item.data(0, Qt.UserRole))
+                hide = only and r is not None and r.status.value not in PROBLEMS
+                item.setHidden(hide)
+                visible += not hide
+            parent.setHidden(visible == 0)
+            if only and visible:
+                parent.setExpanded(True)
 
     def _show_details(self, item, _prev) -> None:
         if item is None:

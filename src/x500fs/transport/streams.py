@@ -54,14 +54,22 @@ class TcpStream:
 
 
 class UdpListenStream:
-    """Listen for a mavlink-router UDP *client* endpoint that sends to this PC."""
+    """Listen for a mavlink-router UDP *client* endpoint that sends to this PC.
 
-    def __init__(self, port: int, bind: str = "0.0.0.0", read_timeout: float = 0.2):
+    Only one sender is accepted: ``allowed_peer`` (an IP address) or, when empty, the first
+    address heard. Datagrams from any other host on the network are dropped, so nobody else
+    can inject a HEARTBEAT (e.g. a fake "disarmed" state) or receive the app's requests.
+    """
+
+    def __init__(self, port: int, bind: str = "0.0.0.0", read_timeout: float = 0.2, allowed_peer: str = ""):
         self.description = f"udp-listen:{bind}:{port}"
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.bind((bind, port))
         self._sock.settimeout(read_timeout)
         self._peer = None
+        self.allowed_ip = allowed_peer.strip() or None
+        self.rejected = 0
+        self.rejected_from: set[str] = set()
 
     def recv(self, n: int) -> bytes | None:
         try:
@@ -70,7 +78,14 @@ class UdpListenStream:
             return None
         except OSError as e:
             raise ConnectionError(str(e)) from None
-        self._peer = addr
+        if self.allowed_ip is None:
+            self.allowed_ip = addr[0]  # lock to the first sender for the life of this stream
+        if addr[0] != self.allowed_ip:
+            self.rejected += 1
+            if len(self.rejected_from) < 16:
+                self.rejected_from.add(addr[0])
+            return None
+        self._peer = addr  # the router's source port may change after it restarts; the address may not
         return data
 
     def send(self, data: bytes) -> None:

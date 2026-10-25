@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import sys
+import tempfile
+import threading
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +58,7 @@ class MavlinkSettings:
     tcp_host: str = ""
     tcp_port: int = 5760
     udp_port: int = 14550
+    udp_allowed_peer: str = ""      # only accept MAVLink from this IP; empty = the first sender heard
     source_sysid: int = 247
     source_compid: int = 25
     target_sysid: int = 0           # 0 = first autopilot heartbeat seen
@@ -228,6 +231,7 @@ class SettingsStore:
         self.dir = Path(directory) if directory else config_dir()
         self.path = self.dir / "settings.json"
         self.load_error: str | None = None
+        self._save_lock = threading.Lock()
 
     @property
     def profiles_dir(self) -> Path:
@@ -257,7 +261,19 @@ class SettingsStore:
             return Settings()
 
     def save(self, s: Settings) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(s.to_dict(), ensure_ascii=False, indent=2) + "\n", "utf-8")
-        os.replace(tmp, self.path)
+        # Saves come from the UI and the poller thread: serialize them, and give each its own
+        # temp file in the same directory so os.replace stays atomic and writers never collide.
+        data = json.dumps(s.to_dict(), ensure_ascii=False, indent=2) + "\n"
+        with self._save_lock:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix="settings.", suffix=".tmp", dir=self.dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                os.replace(tmp, self.path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise

@@ -66,7 +66,10 @@ sudo bash deploy_x500.sh --apply         # גיבוי ל-/var/backups/x500fs/<ז
 ```bash
 sudo bash install_video_sudoers.sh <user>            # מציג את הכלל ובודק אותו עם visudo
 sudo bash install_video_sudoers.sh <user> --apply    # /etc/sudoers.d/x500-video
+sudo bash install_video_sudoers.sh <user> --router --apply   # + כפתור "הפעל mavlink-router מחדש" באפליקציה
 ```
 
 הכלל מתיר בדיוק שש פקודות: `/usr/bin/systemctl start|stop x500-video@high|normal|degraded.service`. אין restart, אין
 יחידות אחרות ואין תווים כלליים.
+עם `--router` נוספות שתי פקודות בלבד: `/usr/bin/systemctl reset-failed|start mavlink-router.service`. האפליקציה שולחת אותן רק כש-systemd
+מדווח שה-router נפל ([docs/mavlink-safety.md](../../docs/mavlink-safety.md#הפעלה-מחדש-של-mavlink-router)).

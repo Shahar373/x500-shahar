@@ -77,3 +77,12 @@
 - [ ] גופן עברי ו-RTL נכונים ב-Windows (Segoe UI)
 - [ ] הסיסמה/passphrase נשמרים במנהל האישורים (Credential Manager → Windows Credentials → ‏`X500FlightStation`)
 - [ ] הסרת ההתקנה משאירה את `%APPDATA%\X500FlightStation`
+
+## mavlink-router והממשק
+
+- [ ] `sudo systemctl stop mavlink-router` (על הספסל, Mission Planner מנותק): תוך מחזור איסוף אחד מופיע הכפתור האדום "הפעל mavlink-router מחדש"
+- [ ] בלי `install_video_sudoers.sh --router`: הלחיצה מסבירה שנדרשת סיסמה ולא שולחת כלום נוסף. אחרי `--router --apply`: ה-router עולה, MAVLink חוזר ל-live והכפתור נעלם
+- [ ] כש-mavlink-router רץ הכפתור לא מוצג בכלל
+- [ ] MAVLink ב-UDP עם "לקבל רק מכתובת" = כתובת ה-Pi: נתונים מגיעים; עם כתובת שגויה - אין נתונים
+- [ ] על מסך Windows אמיתי: "רק בעיות" ברשימת הבדיקות, קטגוריות תקינות מקופלות, לשונית המצלמה קטנה כשהווידאו כבוי
+

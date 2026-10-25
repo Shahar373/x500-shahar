@@ -71,9 +71,9 @@ def collect_mavlink(store, session, conf, profile, timeout_s: float, prearm: boo
     from ..transport.streams import TcpStream
 
     host, port = parse_endpoint(conf["MAVLINK_ENDPOINT"])
-    sysid, compid = int(conf["MAVLINK_SYSID"]), int(conf["MAVLINK_COMPID"])
+    sysid, compid = _num(conf, "MAVLINK_SYSID"), _num(conf, "MAVLINK_COMPID")
     ingest = MavIngest(store, session, simulated=False, endpoint=f"tcp:{host}:{port}",
-                       target_sysid=int(conf["TARGET_SYSID"] or 0), my_sysid=sysid, my_compid=compid)
+                       target_sysid=_num(conf, "TARGET_SYSID"), my_sysid=sysid, my_compid=compid)
     client = MavlinkClient(lambda: TcpStream(host, port), ingest, session,
                            MavConfig(source_sysid=sysid, source_compid=compid, request_messages=True,
                                      request_interval_s=1.0, reconnect_max_s=2.0))
@@ -99,14 +99,23 @@ def collect_mavlink(store, session, conf, profile, timeout_s: float, prearm: boo
             "params_pending": client.pending_params(), "state": link.value.get("state") if link else None}
 
 
+def _num(conf: dict, key: str) -> int:
+    """conf[key] as an integer; an empty or malformed value falls back to the built-in default
+    (as x500-blackbox does for BLACKBOX_INTERVAL)."""
+    try:
+        return int(conf.get(key) or conf_mod.DEFAULTS[key])
+    except ValueError:
+        return int(conf_mod.DEFAULTS[key])
+
+
 def drone_from_conf(conf: dict) -> DroneConfig:
     return DroneConfig(
         name="X500", expected_hostname=conf["EXPECTED_HOSTNAME"], link_path=conf["LINK_PATH"] or "wifi",
         services=dict(collector.DEFAULT_CONFIG["services"]),
         blackbox_globs=conf_mod.collector_config(conf)["blackbox_globs"],
-        mav_source_sysid=int(conf["MAVLINK_SYSID"]), mav_source_compid=int(conf["MAVLINK_COMPID"]),
-        mav_target_sysid=int(conf["TARGET_SYSID"] or 0), watchdog_expected_runtime=conf["WATCHDOG_EXPECTED"],
-        blackbox_sleep_s=float(conf["BLACKBOX_INTERVAL"] or 10), expected_fc_byid=conf["EXPECTED_FC_BYID"],
+        mav_source_sysid=_num(conf, "MAVLINK_SYSID"), mav_source_compid=_num(conf, "MAVLINK_COMPID"),
+        mav_target_sysid=_num(conf, "TARGET_SYSID"), watchdog_expected_runtime=conf["WATCHDOG_EXPECTED"],
+        blackbox_sleep_s=float(max(_num(conf, "BLACKBOX_INTERVAL"), 0) or 10), expected_fc_byid=conf["EXPECTED_FC_BYID"],
         ping_target_configured=bool(conf["PING_TARGET"]), zte_gateway_configured=bool(conf["ZTE_GATEWAY"]),
         ground_ip_configured=bool(conf["GROUND_IP"]), evaluator="pi_local",
         zte_gateway=conf["ZTE_GATEWAY"], ground_ip=conf["GROUND_IP"], lte_interface=conf["LTE_IF"],

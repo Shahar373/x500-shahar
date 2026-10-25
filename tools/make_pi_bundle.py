@@ -35,6 +35,8 @@ def members() -> list[tuple[str, Path, int]]:
     for sub in ("core", "pi_tools"):
         rels += [p.relative_to(SRC).as_posix() for p in sorted((SRC / "x500fs" / sub).rglob("*.py"))]
     rels += [p.relative_to(SRC).as_posix() for p in sorted((SRC / "x500fs" / "profiles").glob("*.json"))]
+    if (SRC / "x500fs" / "profiles" / "__init__.py").is_file():
+        rels.append("x500fs/profiles/__init__.py")
     for rel in rels:
         out.append((f"lib/{rel}", SRC / rel, 0o644))
     return out

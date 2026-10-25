@@ -27,7 +27,7 @@ OWN=(-o root -g root)
 
 if [ -n "$R" ]; then
     OWN=()
-elif [ "$(id -u)" -ne 0 ]; then
+elif [ "$APPLY" = 1 ] && [ "$(id -u)" -ne 0 ]; then   # the dry run only reads, so it may run unprivileged
     echo "Run with sudo (installs into /usr/local/bin, /opt and /etc)." >&2; exit 1
 fi
 [ "$APPLY" = 1 ] && echo "== APPLY mode ==" || echo "== DRY RUN (nothing will be changed; add --apply to install) =="
@@ -70,7 +70,8 @@ LIB_FILES=(x500fs/__init__.py x500fs/pi_side/__init__.py x500fs/pi_side/x500fs_c
            x500fs/pi_side/x500fs_diag.py x500fs/transport/__init__.py x500fs/transport/mav_ingest.py
            x500fs/transport/mavlink_client.py x500fs/transport/streams.py)
 while IFS= read -r rel; do LIB_FILES+=("$rel"); done < <(cd "$LIB_SRC" && find x500fs/core x500fs/pi_tools \
-    -name '*.py' -not -path '*/__pycache__/*' | sort; cd "$LIB_SRC" && ls x500fs/profiles/*.json)
+    -name '*.py' -not -path '*/__pycache__/*' | sort; cd "$LIB_SRC" && ls x500fs/profiles/*.json; \
+    [ ! -f x500fs/profiles/__init__.py ] || echo x500fs/profiles/__init__.py)
 for rel in "${LIB_FILES[@]}"; do
     [ -f "$LIB_SRC/$rel" ] || { echo "missing library file: $rel" >&2; exit 1; }
     add "$LIB_SRC/$rel" "$LIB_DST/$rel" 0644
@@ -84,7 +85,7 @@ for item in "${PLAN[@]}"; do
         echo "NEW      $dst"
         changed=$((changed + 1))
     elif ! cmp -s "$src" "$dst"; then
-        echo "REPLACE  $dst  (backup -> $BACKUP$dst)"
+        echo "REPLACE  $dst  (backup -> $BACKUP${dst#"$R"})"
         case "$dst" in */usr/local/bin/*|*/opt/x500/bin/*) diff -u "$dst" "$src" | head -40 || true; echo "  ...";; esac
         changed=$((changed + 1))
     fi
@@ -100,8 +101,9 @@ fi
 for item in "${PLAN[@]}"; do
     IFS='|' read -r src dst mode <<<"$item"
     if [ -e "$dst" ] && ! cmp -s "$src" "$dst"; then
-        install -D -m 0644 "$dst" "$BACKUP$dst"
-        chmod --reference="$dst" "$BACKUP$dst"
+        bak="$BACKUP${dst#"$R"}"   # path relative to the install root, so rollback is cp -a $BACKUP/. $R/
+        install -D -m 0644 "$dst" "$bak"
+        chmod --reference="$dst" "$bak"
     fi
     if [ ! -e "$dst" ] || ! cmp -s "$src" "$dst"; then
         install -D -m "$mode" "${OWN[@]}" "$src" "$dst"
@@ -117,4 +119,4 @@ echo "A running x500-video@<profile> keeps the OLD x500-video-run until it is st
 echo "(x500-video stop ; x500-video degraded). Camera choice: CAMERA= in /etc/x500/video.conf (default auto)."
 echo
 echo "Try:  x500-health ; x500-blackbox-status ; x500-preflight bench"
-echo "Rollback: sudo cp -a $BACKUP/. /   (then restart the services above)"
+echo "Rollback: sudo cp -a $BACKUP/. $R/   (then restart the services above)"

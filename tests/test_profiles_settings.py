@@ -88,3 +88,26 @@ def test_settings_file_contains_no_secret_fields():
     keys = json.dumps(Settings().to_dict()).lower()
     for word in ("password\"", "passphrase\"", "secret", "token"):
         assert word not in keys
+
+
+def test_concurrent_settings_saves_do_not_collide(tmp_path):
+    import threading
+
+    st = SettingsStore(tmp_path)
+    errors = []
+
+    def worker():
+        try:
+            for _ in range(50):
+                st.save(Settings())
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    json.loads((tmp_path / "settings.json").read_text("utf-8"))
+    assert not list(tmp_path.glob("*.tmp"))

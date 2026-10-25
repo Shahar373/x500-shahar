@@ -138,21 +138,38 @@ class VideoPanel(QWidget):
             grid.addWidget(t, row, 0)
             grid.addWidget(v, row, 1)
             self.pipe_lbls[key] = v
-        self.note = QLabel("הפעלה, עצירה או החלפת פרופיל מותרות רק כשהרחפן אינו חמוש. רק השורה 'תמונה במחשב' "
-                           "מעידה על תמונה חיה; 'מקודד ב-Pi' מעיד רק שה-Pi מייצר וידאו. "
-                           "תקלה בווידאו היא אזהרה נפרדת, אלא אם הפרופיל דורש וידאו.")
-        self.note.setObjectName("disclaimer")
-        self.note.setWordWrap(True)
+        help_text = ("הפעלה, עצירה או החלפת פרופיל מותרות רק כשהרחפן אינו חמוש. רק השורה 'תמונה במחשב' "
+                     "מעידה על תמונה חיה; 'מקודד ב-Pi' מעיד רק שה-Pi מייצר וידאו. "
+                     "תקלה בווידאו היא אזהרה נפרדת, אלא אם הפרופיל דורש וידאו.")
+        self.note = QLabel("ⓘ")
+        self.note.setToolTip(help_text)
+        info.addWidget(self.note)
+        # while video is off the panel stays small: no black frame, only the button and the Pi service line
+        self.idle_lbl = QLabel("הווידאו כבוי. לחץ 'הפעל וידאו' כשהרחפן אינו חמוש.")
+        self.idle_lbl.setObjectName("cardTitle")
+        self.idle_lbl.setWordWrap(True)
+        self.details = QWidget()
+        dl = QVBoxLayout(self.details)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.addWidget(self.frame, 1)
+        dl.addLayout(grid)
         lay = QVBoxLayout(self)
         lay.addLayout(info)
-        lay.addWidget(self.frame, 1)
-        lay.addLayout(grid)
-        lay.addWidget(self.note)
+        lay.addWidget(self.idle_lbl)
+        lay.addWidget(self.details, 1)
+        lay.addStretch(0)
         self._running = False
         self._status: dict = {}
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(250)
+        self._set_compact(True)
+
+    def _set_compact(self, compact: bool) -> None:
+        self.details.setVisible(not compact)
+        self.idle_lbl.setVisible(compact)
+        for w in (self.fps_lbl, self.res_lbl, self.lat_lbl, self.rec_lbl):
+            w.setVisible(not compact)
 
     def update_pipeline(self, snap, worker_status: dict | None, simulated: bool = False) -> None:
         if worker_status and self._running:
@@ -161,7 +178,10 @@ class VideoPanel(QWidget):
                 src = f" · מקור {worker_status['source_size']}" if worker_status.get("source_size") else ""
                 self.res_lbl.setText(f"רזולוציה: \u2066{worker_status['width']}x{worker_status['height']}\u2069 "
                                      f"({worker_status.get('codec') or '?'}){src}")
-        for key, (text, level) in pipeline_summary(snap, worker_status, simulated).items():
+        summary = pipeline_summary(snap, worker_status, simulated)
+        text, level = summary["service"]
+        self.idle_lbl.setText("הווידאו כבוי · שירות ב-Pi: " + text)
+        for key, (text, level) in summary.items():
             lbl = self.pipe_lbls[key]
             lbl.setText(text)
             lbl.setStyleSheet(f"color:{LEVEL_COLOR.get(level, '#1d2330')};font-weight:600")
@@ -172,6 +192,7 @@ class VideoPanel(QWidget):
     def set_running(self, running: bool) -> None:
         self._running = running
         self.btn.setText("עצור וידאו" if running else "הפעל וידאו")
+        self._set_compact(not running)
         if not running:
             self.frame.state = "stopped"
             self.frame.message = ""

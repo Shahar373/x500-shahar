@@ -29,9 +29,9 @@ def main(out_dir: str) -> int:
     tmp = Path(tempfile.mkdtemp(prefix="x500fs-shots-"))
     app = create_application()
     for name, scenario, profile, tab, select in (
-        ("main-bench-healthy", "healthy", "bench", 0, "fc.prearm"),
+        ("main-bench-healthy", "healthy", "bench", 1, "fc.prearm"),
         ("main-flight-prearm-fail", "prearm_fail", "flight", 2, "fc.prearm"),
-        ("main-telemetry", "healthy", "bench", 1, "batt.voltage"),
+        ("main-telemetry", "healthy", "bench", 0, "batt.voltage"),
     ):
         store = SettingsStore(tmp / name)
         s = store.load()
@@ -45,7 +45,7 @@ def main(out_dir: str) -> int:
         w.ctl.connect()
         pump(app, 2.0)
         w._run_preflight()
-        if tab == 0:
+        if tab == 1:
             w._start_video()
         pump(app, 2.5)
         w.tabs.setCurrentIndex(tab)
