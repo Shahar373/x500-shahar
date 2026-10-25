@@ -249,6 +249,34 @@ def test_kernel_sensor_binding_from_sysfs(tmp_path, monkeypatch):
     assert acc["media_devices"] == 0 and acc["media_access"] is None
 
 
+def test_usb_cameras_from_sysfs(tmp_path, monkeypatch):
+    from test_pi_scripts import fake_uvc_camera
+
+    monkeypatch.setattr(col, "ROOT", str(tmp_path))
+    assert col._usb_cameras() == []
+    fake_uvc_camera(tmp_path)
+    # the UVC metadata node (index 1) and a platform (CSI) node are not webcams
+    meta = tmp_path / "sys/devices/platform/axi/usb1/1-1/1-1:1.0/video4linux/video1"
+    meta.mkdir()
+    (meta / "index").write_text("1\n")
+    (meta / "name").write_text("UVC Camera (046d:0825)\n")
+    (meta / "device").symlink_to(meta.parent.parent)
+    (tmp_path / "sys/class/video4linux/video1").symlink_to(meta)
+    csi = tmp_path / "sys/devices/platform/axi/1f00110000.csi/video4linux/video4"
+    csi.mkdir(parents=True)
+    (csi / "index").write_text("0\n")
+    (csi / "name").write_text("rp1-cfe\n")
+    (csi / "device").symlink_to(csi.parent.parent)
+    (tmp_path / "sys/class/video4linux/video4").symlink_to(csi)
+    byid = tmp_path / "dev/v4l/by-id"
+    byid.mkdir(parents=True)
+    (byid / "usb-046d_0825_ABC-video-index0").symlink_to("../../video0")
+    assert col._usb_cameras() == [{"device": "/dev/video0", "name": "UVC Camera (046d:0825)", "vid": "046d",
+                                   "pid": "0825", "by_id": "usb-046d_0825_ABC-video-index0"}]
+    out = col.sec_camera({"camera_probe": False})
+    assert out["usb_cameras"][0]["device"] == "/dev/video0"
+
+
 def test_poller_always_requests_tools_on_slow_cycle():
     from x500fs.settings import PiSettings, VideoSettings
     from x500fs.transport.pi_link import sections_for

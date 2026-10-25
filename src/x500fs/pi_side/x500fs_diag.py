@@ -76,6 +76,12 @@ def main(argv=None):
     except OSError as e:
         items["serial_by_id"] = "unavailable: %s" % e
     items["cameras"] = run(["rpicam-hello", "--list-cameras"], 15)
+    try:
+        webcams = sorted(n for n in os.listdir("/dev/v4l/by-id") if n.endswith("-video-index0"))
+        items["usb_webcams"] = {n: run(["v4l2-ctl", "-d", "/dev/v4l/by-id/" + n, "--list-formats-ext"])
+                                for n in webcams[:4]}
+    except OSError as e:
+        items["usb_webcams"] = "unavailable: %s" % e
     items["vcgencmd"] = {k: run(["vcgencmd"] + k.split()) for k in ("measure_temp", "get_throttled", "pmic_read_adc")}
     items["mavlink_router_conf"] = read("/etc/mavlink-router/main.conf")
     items["x500_conf"] = read("/etc/x500/x500.conf")

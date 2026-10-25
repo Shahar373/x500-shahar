@@ -36,7 +36,8 @@
 | `x500-blackbox-status` | שירות, קבצים, ערכים אחרונים | "תקין" דורש **גם** שירות פעיל **וגם** דגימה תקינה עדכנית; הקצב **נמדד** מהדגימות; בלי "Retention: 14 days" |
 | `x500-fc-detect` | by-id, מועמדים, הרשאות, mavlink-router | השוואה לתבנית/שם שהוגדרו; מזהיר על סמן בתצורת ה-router; לא פותח את הפורט |
 | `x500-diag` | אותם מקורות | **stdout בלבד** (JSON), לא כותב קבצים ב-Pi. האפליקציה מציעה ייצוא מוסתר (כפתור "ייצוא אבחון") |
-| `x500-video`, ‏`x500-video-run`, ‏`x500-video@.service` | **ללא שינוי** | — |
+| `x500-video-run` | אותם פרופילים, פורט, אפשרויות SRT וקובץ progress | בוחר מצלמה לפי `CAMERA` ב-`/etc/x500/video.conf`: ‏`auto` (‏USB אם מחוברת, אחרת מצלמת ה-Pi), ‏`csi`, ‏`usb`. כותב את הבחירה ל-`/run/x500-video-<profile>.source`. פירוט: [docs/video.md](../../docs/video.md#מצלמת-usb-במקום-מצלמת-ה-pi) |
+| `x500-video`, ‏`x500-video@.service`, ‏`/etc/x500/video.conf` | **ללא שינוי** (‏`deploy_x500.sh` לא נוגע בהם) | — |
 
 לא נוגעים בהם בכלל: תצורת mavlink-router, תצורת ה-watchdog וה-journald, קבצי ה-service.
 
@@ -54,7 +55,7 @@ sudo bash deploy_x500.sh                 # שוב הרצה יבשה
 sudo bash deploy_x500.sh --apply         # גיבוי ל-/var/backups/x500fs/<זמן>/ ואז התקנה
 ```
 
-מה מותקן: הפקודות ב-`/usr/local/bin` ו-`/opt/x500/bin` (כמו היום), והספרייה המשותפת ב-`/opt/x500fs/lib`.
+מה מותקן: הפקודות ב-`/usr/local/bin` ו-`/opt/x500/bin` (כמו היום, כולל `x500-video-run`), והספרייה המשותפת ב-`/opt/x500fs/lib`.
 **שום שירות לא מופעל מחדש.** הקופסה השחורה ומנטר הרשת ממשיכים להריץ את הקוד הישן עד שתריץ על הספסל:
 `sudo systemctl restart x500-blackbox x500-net-monitor`.
 

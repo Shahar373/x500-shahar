@@ -1,0 +1,12 @@
+# /etc/x500/video.conf - read by /opt/x500/bin/x500-video-run (x500-video@<profile>.service).
+# deploy_x500.sh never overwrites this file. To use a USB webcam, add the CAMERA lines below
+# to the existing file by hand. Missing keys keep their defaults (CAMERA=auto).
+GROUND_IP=""                 # not used by the SRT listener (kept for older tools)
+PORT=5600                    # SRT listen port on the Tailscale address
+
+# --- camera source ---
+CAMERA=auto                  # auto: USB webcam if plugged in, else the Pi camera | csi | usb
+USB_DEVICE=""                # empty = first USB (UVC) camera; or e.g. /dev/v4l/by-id/usb-046d_0825_...-video-index0
+USB_INPUT_FORMAT=mjpeg       # mjpeg (Logitech C270 and most webcams) | yuyv422
+USB_CAPTURE_SIZE=640x480     # a mode the webcam supports; scaled on the Pi to the profile size
+USB_MAX_FPS=30               # the C270 gives at most 30 FPS; the "high" profile (60) is capped to this

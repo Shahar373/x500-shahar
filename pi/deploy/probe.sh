@@ -33,6 +33,8 @@ have rpicam-hello && run rpicam-hello --version
 have rpicam-hello && run rpicam-hello --list-cameras
 have dpkg-query && run dpkg-query -W -f='${Package} ${Version}\n' rpicam-apps rpicam-apps-lite libcamera0.5 libcamera0.4 libcamera-ipa python3-picamera2 ffmpeg
 echo "video devices:"; ls -l /dev/video* 2>/dev/null | head -n 30
+echo "USB webcams (/dev/v4l/by-id):"; ls -l /dev/v4l/by-id 2>/dev/null | head -n 10
+have v4l2-ctl && for d in /dev/v4l/by-id/*-video-index0; do [ -e "$d" ] && run v4l2-ctl -d "$d" --list-formats-ext; done
 echo "/dev/video11 (Pi 4 style HW H.264 encoder) present: $([ -e /dev/video11 ] && echo yes || echo no)"
 
 section "power / thermal"

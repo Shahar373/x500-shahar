@@ -570,8 +570,26 @@ def pi_mavlink_router(ctx, cfg):
 @check("pi.camera", "pi", "זיהוי מצלמה")
 def pi_camera(ctx, cfg):
     data, age = ctx.require_section("camera")
-    src = ctx.src(f"Pi collector · {data.get('tool') or 'rpicam-hello'} --list-cameras")
     bad = Status.FAIL if ctx.profile.video_required else Status.WARN
+    mode, chosen = _camera_mode(ctx)
+    usb = data.get("usb_cameras")
+    if mode in ("auto", "usb") and isinstance(usb, list):
+        src = ctx.src("Pi collector · /sys/class/video4linux (USB) · CAMERA=" + mode)
+        expected = "מצלמת USB מחוברת" if mode == "usb" else "מצלמת USB או IMX219 מזוהה"
+        if usb:
+            names = ", ".join(str(c.get("name") or c.get("device") or "?") for c in usb)
+            note = ""
+            if chosen and chosen.get("camera") == "csi":
+                note = " שירות הווידאו הנוכחי הופעל לפני שהמצלמה חוברה ומשתמש במצלמת ה-Pi - הפעל מחדש את הווידאו."
+            return R(Status.PASS, "מצלמת USB זוהתה; שירות הווידאו ישתמש בה." + note, observed=ltr(names),
+                     expected=expected, source=src, age_s=age, evidence=data)
+        if mode == "usb":
+            return R(bad, "הוגדר CAMERA=usb אבל לא נמצאה מצלמת USB (UVC). בדוק את החיבור ואת lsusb.",
+                     observed="0 מצלמות USB", expected=expected, source=src, age_s=age, evidence=data)
+    elif mode == "usb":
+        raise Unavailable(R(Status.UNKNOWN, "הוגדר CAMERA=usb, אבל ה-collector לא דיווח על מצלמות USB.",
+                            source=ctx.src("Pi collector"), age_s=age, evidence=data))
+    src = ctx.src(f"Pi collector · {data.get('tool') or 'rpicam-hello'} --list-cameras")
     cams = data.get("cameras")
     if data.get("tool") is None:
         return R(Status.UNKNOWN, "לא נמצא כלי rpicam/libcamera ב-Pi, לא ניתן לבדוק מצלמה.",
@@ -622,6 +640,17 @@ def _camera_hint(data: dict) -> str:
         return " מנהל ההתקן imx219 טעון אבל החיישן לא נמצא - בדוק את הכבל ואת החיבור."
     return (" הקרנל לא טען את מנהל ההתקן imx219, כלומר המצלמה לא זוהתה באתחול. בדוק את הכבל ואת כיוון החיבור "
             "(ב-Pi 5 נדרש כבל עם מחבר 22 פינים בצד ה-Pi), חבר רק כשה-Pi כבוי, ובדוק camera_auto_detect ב-config.txt.")
+
+
+def _camera_mode(ctx) -> tuple[str, dict | None]:
+    """CAMERA= from /etc/x500/video.conf (auto when unknown) and what the running service picked."""
+    try:
+        vdata, _ = ctx.require_section("video")
+    except Unavailable:
+        return "auto", None
+    mode = str(((vdata.get("config") or {}).get("CAMERA")) or "auto").lower()
+    source = vdata.get("source") if isinstance(vdata.get("source"), dict) else None
+    return (mode if mode in ("auto", "csi", "usb") else "auto"), source
 
 
 @check("pi.tools", "pi", "סקריפטים קיימים ב-Pi")

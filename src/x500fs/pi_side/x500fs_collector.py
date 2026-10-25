@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
         "profiles": ["high", "normal", "degraded"],
         "unit_template": "x500-video@{profile}.service",
         "progress_template": "/run/x500-video-{profile}.progress",
+        "source_template": "/run/x500-video-{profile}.source",
         "config_file": "/etc/x500/video.conf",
     },
     "watchdog_conf_globs": ["/etc/systemd/system.conf", "/etc/systemd/system.conf.d/*.conf"],
@@ -715,15 +716,16 @@ def sec_mavlink_router(cfg):
 
 
 def sec_camera(cfg):
+    usb = _usb_cameras()
     if not cfg.get("camera_probe", True):
-        return {"tool": None, "cameras": None, "note": "camera probe disabled"}
+        return {"tool": None, "cameras": None, "usb_cameras": usb, "note": "camera probe disabled"}
     tool = which("rpicam-hello") or which("libcamera-hello")
     if not tool:
-        return {"tool": None, "cameras": None}
+        return {"tool": None, "cameras": None, "usb_cameras": usb}
     rc, so, se = run([tool, "--list-cameras"], 12)
     text = so + "\n" + se
     cams = parse_list_cameras(text)
-    out = {"tool": os.path.basename(tool), "cameras": cams, "exit_code": rc, "note": None}
+    out = {"tool": os.path.basename(tool), "cameras": cams, "usb_cameras": usb, "exit_code": rc, "note": None}
     if not cams:
         if "No cameras available" in text:
             out["note"] = "No cameras available"
@@ -732,6 +734,40 @@ def sec_camera(cfg):
         out["permission_denied"] = "Permission denied" in text
         out.update(_camera_access())
         out["kernel_sensor"] = _kernel_sensor("imx219")
+    return out
+
+
+def _usb_cameras():
+    """USB (UVC) webcams from sysfs, the same rule x500-video-run uses to pick one. Read-only."""
+    base = rp("/sys/class/video4linux")
+    try:
+        names = sorted(os.listdir(base), key=lambda n: (len(n), n))
+    except OSError:
+        return []
+    by_id = {}
+    try:
+        for link in os.listdir(rp("/dev/v4l/by-id")):
+            by_id[os.path.basename(os.path.realpath(os.path.join(rp("/dev/v4l/by-id"), link)))] = link
+    except OSError:
+        pass
+    out = []
+    for n in names:
+        d = os.path.join(base, n)
+        if (read_text(os.path.join(d, "index")) or "0").strip() != "0":
+            continue  # a UVC camera's second node is metadata, not video
+        dev = os.path.realpath(os.path.join(d, "device"))
+        if "/usb" not in dev:
+            continue
+        drv = os.path.basename(os.path.realpath(os.path.join(dev, "driver")))
+        if drv != "uvcvideo":
+            continue
+        usb_dir = dev
+        while usb_dir not in ("", "/") and not os.path.exists(os.path.join(usb_dir, "idVendor")):
+            usb_dir = os.path.dirname(usb_dir)
+        vid = (read_text(os.path.join(usb_dir, "idVendor")) or "").strip() or None
+        pid = (read_text(os.path.join(usb_dir, "idProduct")) or "").strip() or None
+        out.append({"device": "/dev/" + n, "name": (read_text(os.path.join(d, "name")) or "").strip() or None,
+                    "vid": vid, "pid": pid, "by_id": by_id.get(n)})
     return out
 
 
@@ -1079,13 +1115,21 @@ def sec_video(cfg):
         if rc == 0:
             listening = [x for x in parse_ss_listening(so) if x["port"] == int(port)]
     ground = conf_vars.get("GROUND_IP", "")
+    source = None
+    if active:
+        path = (v.get("source_template") or "/run/x500-video-{profile}.source").format(profile=active)
+        text = read_text(path)
+        if text is not None:
+            source = {"path": path, **parse_shell_vars(text)}
     return {
         "profiles": profiles,
         "units": units,
         "active_profile": active,
         "progress": progress,
         "config": {"found": bool(conf_vars), "PORT": port,
-                   "GROUND_IP_set": bool(ground) and not MARKER_RE.search(ground)},
+                   "GROUND_IP_set": bool(ground) and not MARKER_RE.search(ground),
+                   "CAMERA": conf_vars.get("CAMERA") or "auto", "USB_DEVICE": conf_vars.get("USB_DEVICE") or None},
+        "source": source,
         "udp_listening": listening,
         "rpicam_vid": bool(which("rpicam-vid")),
         "ffmpeg": bool(which("ffmpeg")),

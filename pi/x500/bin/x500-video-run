@@ -1,0 +1,188 @@
+#!/bin/bash
+# x500-video-run <high|normal|degraded> - started by x500-video@<profile>.service (as root).
+#
+# Encodes H.264 (libx264, the Pi 5 has no hardware encoder) into MPEG-TS and listens for one
+# SRT caller on the Pi's Tailscale address. Same profiles, port and SRT options as before.
+#
+# Camera source (CAMERA in /etc/x500/video.conf):
+#   auto (default)  a USB (UVC) webcam if one is plugged in, otherwise the Pi camera (CSI)
+#   csi             always the Pi camera: rpicam-vid -> ffmpeg
+#   usb             always the USB webcam: ffmpeg -f v4l2 (MJPEG by default, e.g. Logitech C270)
+# The choice is made each time the service starts. systemd restarts the service when the stream
+# ends (Restart=always), so unplugging the USB camera falls back to the Pi camera in auto mode.
+# What was chosen is written to /run/x500-video-<profile>.source (read by the desktop app).
+set -euo pipefail
+
+CONF="${X500_VIDEO_CONF:-/etc/x500/video.conf}"
+ROOT="${X500FS_ROOT:-}"                     # test hook: read /sys from another root
+RUN_DIR="${X500_VIDEO_RUN_DIR:-/run}"
+# shellcheck source=/dev/null
+source "$CONF"
+
+CAMERA="${CAMERA:-auto}"
+USB_DEVICE="${USB_DEVICE:-}"                # empty = first USB capture device found
+USB_INPUT_FORMAT="${USB_INPUT_FORMAT:-mjpeg}"
+USB_CAPTURE_SIZE="${USB_CAPTURE_SIZE:-640x480}"
+USB_MAX_FPS="${USB_MAX_FPS:-30}"
+
+LISTEN_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+
+if [ -z "$LISTEN_IP" ]; then
+    echo "ERROR: No Tailscale IPv4 address available"
+    exit 10
+fi
+
+PROFILE="${1:-normal}"
+
+case "$PROFILE" in
+    high)
+        WIDTH=640
+        HEIGHT=480
+        FPS=60
+        BITRATE=1200k
+        BUFSIZE=200k
+        GOP=60
+        LATENCY=120000
+        ;;
+    normal)
+        WIDTH=640
+        HEIGHT=480
+        FPS=30
+        BITRATE=650k
+        BUFSIZE=200k
+        GOP=30
+        LATENCY=180000
+        ;;
+    degraded)
+        WIDTH=480
+        HEIGHT=360
+        FPS=20
+        BITRATE=350k
+        BUFSIZE=120k
+        GOP=20
+        LATENCY=300000
+        ;;
+    *)
+        echo "Unknown profile: $PROFILE"
+        exit 2
+        ;;
+esac
+
+# First V4L2 capture node of a UVC (USB) camera. The Pi camera's own /dev/video* nodes are
+# platform devices (rp1-cfe, pispbe), never USB; a UVC camera's second node (index 1) is metadata.
+find_usb_camera() {
+    local d dev
+    for d in "$ROOT"/sys/class/video4linux/video*; do
+        [ -e "$d/name" ] || continue
+        [ "$(cat "$d/index" 2>/dev/null || echo 0)" = 0 ] || continue
+        dev="$(readlink -f "$d/device" 2>/dev/null || true)"
+        case "$dev" in */usb*) ;; *) continue ;; esac
+        [ "$(basename "$(readlink -f "$d/device/driver" 2>/dev/null || echo none)")" = uvcvideo ] || continue
+        echo "/dev/$(basename "$d")"
+        return 0
+    done
+    return 1
+}
+
+usb_name() {
+    cat "$ROOT/sys/class/video4linux/$(basename "$1")/name" 2>/dev/null || echo unknown
+}
+
+case "$CAMERA" in
+    auto)
+        if [ -n "$USB_DEVICE" ] && [ -e "$USB_DEVICE" ]; then SOURCE=usb; DEVICE="$USB_DEVICE"
+        elif [ -z "$USB_DEVICE" ] && DEVICE="$(find_usb_camera)"; then SOURCE=usb
+        else SOURCE=csi; DEVICE=""
+        fi
+        ;;
+    csi)
+        SOURCE=csi; DEVICE=""
+        ;;
+    usb)
+        SOURCE=usb
+        if [ -n "$USB_DEVICE" ]; then DEVICE="$USB_DEVICE"
+        elif ! DEVICE="$(find_usb_camera)"; then
+            echo "ERROR: CAMERA=usb but no USB camera found (/sys/class/video4linux)"
+            exit 11
+        fi
+        if [ ! -e "$DEVICE" ]; then
+            echo "ERROR: USB camera device $DEVICE does not exist"
+            exit 11
+        fi
+        ;;
+    *)
+        echo "Unknown CAMERA=$CAMERA in $CONF (expected auto, csi or usb)"
+        exit 2
+        ;;
+esac
+
+# A webcam such as the C270 tops out at 30 FPS; ask for no more than it can give.
+OUT_FPS="$FPS"
+if [ "$SOURCE" = usb ] && [ "$FPS" -gt "$USB_MAX_FPS" ]; then
+    OUT_FPS="$USB_MAX_FPS"
+    GOP="$OUT_FPS"                          # keep one keyframe per second, as in every profile
+fi
+
+PROGRESS="$RUN_DIR/x500-video-${PROFILE}.progress"
+rm -f "$PROGRESS"
+{
+    echo "camera=$SOURCE"
+    echo "mode=$CAMERA"
+    if [ "$SOURCE" = usb ]; then
+        printf 'device=%q\n' "$DEVICE"
+        printf 'name=%q\n' "$(usb_name "$(readlink -f "$DEVICE")")"
+        echo "input_format=$USB_INPUT_FORMAT"
+        echo "capture_size=$USB_CAPTURE_SIZE"
+    fi
+    echo "size=${WIDTH}x${HEIGHT}"
+    echo "fps=$OUT_FPS"
+} > "$RUN_DIR/x500-video-${PROFILE}.source" 2>/dev/null || true
+
+echo "Starting X500 video profile: $PROFILE"
+echo "Camera: $SOURCE${DEVICE:+ ($DEVICE)} [CAMERA=$CAMERA]"
+echo "${WIDTH}x${HEIGHT} @ ${OUT_FPS} FPS, bitrate=${BITRATE}"
+echo "Listening on: ${LISTEN_IP}:${PORT}"
+echo "SRT latency: ${LATENCY} us"
+
+ENCODE=(
+  -an
+  -c:v libx264
+  -preset ultrafast
+  -tune zerolatency
+  -profile:v baseline
+  -bf 0
+  -refs 1
+  -g "$GOP"
+  -keyint_min "$GOP"
+  -b:v "$BITRATE"
+  -maxrate "$BITRATE"
+  -bufsize "$BUFSIZE"
+  -x264-params 'scenecut=0:rc-lookahead=0:sync-lookahead=0:repeat-headers=1:sliced-threads=1'
+  -muxdelay 0
+  -muxpreload 0
+  -flush_packets 1
+  -f mpegts
+  "srt://${LISTEN_IP}:${PORT}?mode=listener&transtype=live&latency=${LATENCY}&tlpktdrop=1&pkt_size=1316"
+)
+FFMPEG=(ffmpeg -hide_banner -loglevel warning -progress "$PROGRESS" -stats_period 1)
+
+if [ "$SOURCE" = usb ]; then
+    # MJPEG is decoded on the Pi and scaled to the profile size; the desktop decodes at that size.
+    CMD=("${FFMPEG[@]}"
+         -f v4l2 -input_format "$USB_INPUT_FORMAT" -video_size "$USB_CAPTURE_SIZE" -framerate "$OUT_FPS"
+         -i "$DEVICE"
+         -vf "scale=${WIDTH}:${HEIGHT},format=yuv420p"
+         "${ENCODE[@]}")
+    if [ -n "${X500_VIDEO_DRY_RUN:-}" ]; then printf '%q ' "${CMD[@]}"; echo; exit 0; fi
+    exec "${CMD[@]}"
+fi
+
+CMD=("${FFMPEG[@]}"
+     -f rawvideo -pix_fmt yuv420p -video_size "${WIDTH}x${HEIGHT}" -framerate "$FPS"
+     -i -
+     "${ENCODE[@]}")
+RPICAM=(rpicam-vid -t 0 -n --codec yuv420 --denoise cdn_off
+        --width "$WIDTH" --height "$HEIGHT" --framerate "$FPS" -o -)
+if [ -n "${X500_VIDEO_DRY_RUN:-}" ]; then printf '%q ' "${RPICAM[@]}"; printf '| '; printf '%q ' "${CMD[@]}"; echo; exit 0; fi
+# shellcheck disable=SC2016
+exec bash -c 'set -o pipefail; n="$1"; shift; "${@:1:n}" | "${@:n+1}"' x500-video "${#RPICAM[@]}" "${RPICAM[@]}" "${CMD[@]}"

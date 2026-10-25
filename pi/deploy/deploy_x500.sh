@@ -6,8 +6,8 @@
 #
 # Run it from an unpacked bundle (python tools/make_pi_bundle.py) or from a checkout of the repo.
 # The desktop app never runs this. Nothing is restarted automatically; the script prints the
-# explicit commands. The video pipeline (x500-video, x500-video-run, x500-video@.service),
-# mavlink-router configuration and the watchdog configuration are NOT touched.
+# explicit commands. x500-video-run (Pi camera or USB webcam) is replaced; the x500-video command,
+# x500-video@.service, /etc/x500/video.conf, mavlink-router and the watchdog configuration are NOT touched.
 set -euo pipefail
 
 APPLY=0
@@ -63,7 +63,7 @@ add() { PLAN+=("$1|$2|$3"); }   # src|dst|mode
 for f in x500-preflight x500-health x500-net x500-blackbox-status x500-diag x500-fc-detect x500-status; do
     add "$PI_SRC/bin/$f" "$R/usr/local/bin/$f" 0755
 done
-for f in x500-blackbox x500-net-monitor x500-status; do
+for f in x500-blackbox x500-net-monitor x500-status x500-video-run; do
     add "$PI_SRC/bin/$f" "$R/opt/x500/bin/$f" 0755
 done
 LIB_FILES=(x500fs/__init__.py x500fs/pi_side/__init__.py x500fs/pi_side/x500fs_collector.py
@@ -112,6 +112,9 @@ echo
 echo "Nothing was restarted. The black-box logger and network monitor keep running the OLD"
 echo "scripts until you restart them explicitly (do this on the bench, not during a flight):"
 echo "  sudo systemctl restart x500-blackbox x500-net-monitor"
+echo
+echo "A running x500-video@<profile> keeps the OLD x500-video-run until it is stopped and started again"
+echo "(x500-video stop ; x500-video degraded). Camera choice: CAMERA= in /etc/x500/video.conf (default auto)."
 echo
 echo "Try:  x500-health ; x500-blackbox-status ; x500-preflight bench"
 echo "Rollback: sudo cp -a $BACKUP/. /   (then restart the services above)"

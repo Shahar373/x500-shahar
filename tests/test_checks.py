@@ -491,3 +491,52 @@ def test_video_restart_loop_is_not_camera_busy():
     w.put("pi.collector", doc)
     res, _ = w.evaluate()
     assert res["pi.camera"].status is Status.UNKNOWN
+
+
+UVC = {"device": "/dev/video0", "name": "UVC Camera (046d:0825)", "vid": "046d", "pid": "0825", "by_id": None}
+
+
+def _camera_world(camera_mode="auto", usb=(), imx=True, source=None):
+    w = World().healthy()
+    doc = copy.deepcopy(w.store.get("pi.collector").value)
+    cam = doc["sections"]["camera"]["data"]
+    cam["usb_cameras"] = list(usb)
+    if not imx:
+        cam.update(cameras=[], note="No cameras available", in_video_group=True, media_access=True,
+                   kernel_sensor={"driver": "imx219", "driver_loaded": False, "devices": []})
+    v = doc["sections"]["video"]["data"]
+    v["config"]["CAMERA"] = camera_mode
+    if source:
+        v["active_profile"] = "degraded"
+        v.setdefault("units", {})["degraded"] = {"ActiveState": "active", "SubState": "running", "NRestarts": "0"}
+        v["source"] = source
+    w.put("pi.collector", doc)
+    return w
+
+
+def test_usb_webcam_passes_camera_check_without_pi_camera():
+    res, _ = _camera_world(usb=[UVC], imx=False).evaluate()
+    r = res["pi.camera"]
+    assert r.status is Status.PASS, r.explanation
+    assert "USB" in r.explanation and "UVC Camera" in r.observed
+
+
+def test_usb_mode_without_webcam_is_bad_and_auto_falls_back_to_pi_camera():
+    res, _ = _camera_world("usb").evaluate()
+    assert res["pi.camera"].status is Status.WARN and "CAMERA=usb" in res["pi.camera"].explanation
+    res, _ = _camera_world("auto").evaluate()
+    assert res["pi.camera"].status is Status.PASS and "IMX219" in res["pi.camera"].explanation
+    # CAMERA=csi ignores a plugged-in webcam
+    res, _ = _camera_world("csi", usb=[UVC], imx=False).evaluate()
+    assert res["pi.camera"].status is Status.WARN
+
+
+def test_running_service_still_on_pi_camera_after_webcam_plugged_in():
+    w = _camera_world(usb=[UVC], source={"camera": "csi", "mode": "auto"})
+    res, _ = w.evaluate()
+    assert res["pi.camera"].status is Status.PASS
+    assert "הפעל מחדש את הווידאו" in res["pi.camera"].explanation
+    w = _camera_world(usb=[UVC], source={"camera": "usb", "name": "UVC Camera (046d:0825)", "device": "/dev/video0"})
+    w.drone.video_active = True
+    res, _ = w.evaluate()
+    assert "מצלמה: USB" in res["video.pi_service"].observed

@@ -198,6 +198,8 @@ def test_deploy_apply_backs_up_and_installs(tmp_path):
     assert backups and backups[0].read_text() == "#!/bin/bash\necho legacy\n"
     assert (root / "opt" / "x500fs" / "lib" / "x500fs" / "pi_tools" / "preflight.py").exists()
     assert (root / "opt" / "x500" / "bin" / "x500-blackbox").exists()
+    assert (root / "opt" / "x500" / "bin" / "x500-video-run").read_text() == (BIN / "x500-video-run").read_text()
+    assert not (root / "etc" / "x500" / "video.conf").exists()          # the camera choice stays the user's file
     assert "Nothing was restarted" in r.stdout
     assert not (root / "etc" / "systemd").exists()          # services/router/watchdog untouched
 
@@ -287,3 +289,85 @@ def test_video_sudoers_rule_is_exactly_six_commands(tmp_path):
         assert c.split()[2] in {f"x500-video@{p}.service" for p in ("high", "normal", "degraded")}
     assert "*" not in rule and "ALL=(root) NOPASSWD: ALL" not in rule
     assert "Dry run" in r.stdout and not Path("/etc/sudoers.d/x500-video").exists()
+
+
+# ---------------------------------------------------------------- x500-video-run: Pi camera or USB webcam
+
+
+def fake_uvc_camera(root: Path, node="video0", name="UVC Camera (046d:0825)"):
+    """sysfs as the kernel lays out a UVC webcam: class link -> USB interface bound to uvcvideo."""
+    intf = root / "sys/devices/platform/axi/usb1/1-1/1-1:1.0"
+    vdir = intf / "video4linux" / node
+    vdir.mkdir(parents=True)
+    (vdir / "name").write_text(name + "\n")
+    (vdir / "index").write_text("0\n")
+    (vdir / "device").symlink_to(intf)
+    drv = root / "sys/bus/usb/drivers/uvcvideo"
+    drv.mkdir(parents=True, exist_ok=True)
+    (intf / "driver").symlink_to(drv)
+    (intf.parent / "idVendor").write_text("046d\n")
+    (intf.parent / "idProduct").write_text("0825\n")
+    cls = root / "sys/class/video4linux"
+    cls.mkdir(parents=True, exist_ok=True)
+    (cls / node).symlink_to(vdir)
+
+
+def run_video(tmp_path, profile, conf="", usb=False, extra=None):
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    if usb:
+        fake_uvc_camera(root)
+    (tmp_path / "video.conf").write_text("PORT=5600\n" + conf)
+    fb = fake_bin(tmp_path, {"tailscale": "echo 100.64.0.20"})
+    env = {"X500_VIDEO_CONF": str(tmp_path / "video.conf"), "X500FS_ROOT": str(root),
+           "X500_VIDEO_RUN_DIR": str(tmp_path), "X500_VIDEO_DRY_RUN": "1", **(extra or {})}
+    r = run_script("x500-video-run", profile, env_extra=env, path_prefix=fb)
+    src = tmp_path / f"x500-video-{profile}.source"
+    return r, (src.read_text() if src.exists() else "")
+
+
+def test_video_run_without_usb_camera_uses_pi_camera_unchanged(tmp_path):
+    r, src = run_video(tmp_path, "degraded")
+    assert r.returncode == 0, r.stderr
+    cmd = r.stdout.strip().splitlines()[-1]
+    assert cmd.startswith("rpicam-vid -t 0 -n --codec yuv420 --denoise cdn_off --width 480 --height 360 --framerate 20")
+    assert "-f rawvideo -pix_fmt yuv420p -video_size 480x360" in cmd and "v4l2" not in cmd
+    assert "srt://100.64.0.20:5600\\?mode=listener" in cmd and "latency=300000" in cmd
+    assert "camera=csi" in src and "mode=auto" in src
+
+
+def test_video_run_auto_prefers_usb_webcam_and_caps_fps(tmp_path):
+    r, src = run_video(tmp_path, "high", usb=True)
+    assert r.returncode == 0, r.stderr
+    cmd = r.stdout.strip().splitlines()[-1]
+    assert "rpicam-vid" not in cmd
+    assert "-f v4l2 -input_format mjpeg -video_size 640x480 -framerate 30 -i /dev/video0" in cmd
+    assert "-g 30 -keyint_min 30" in cmd and "-b:v 1200k" in cmd       # C270 max 30 FPS, 1 s GOP kept
+    assert "Camera: usb (/dev/video0)" in r.stdout
+    assert "camera=usb" in src and "device=/dev/video0" in src and "fps=30" in src
+    import shlex
+    name = [ln for ln in src.splitlines() if ln.startswith("name=")][0][5:]
+    assert shlex.split(name) == ["UVC Camera (046d:0825)"]
+
+
+def test_video_run_usb_scales_to_profile_size(tmp_path):
+    r, _ = run_video(tmp_path, "degraded", usb=True)
+    cmd = r.stdout.strip().splitlines()[-1]
+    assert "-video_size 640x480 -framerate 20" in cmd and "scale=480:360\\,format=yuv420p" in cmd
+
+
+def test_video_run_forced_modes(tmp_path):
+    r, _ = run_video(tmp_path, "normal", conf="CAMERA=usb\n")
+    assert r.returncode == 11 and "no USB camera found" in r.stdout
+    r, src = run_video(tmp_path, "normal", conf="CAMERA=csi\n", usb=True)
+    assert r.returncode == 0 and "rpicam-vid" in r.stdout and "camera=csi" in src
+    r, _ = run_video(tmp_path, "normal", conf="CAMERA=webcam\n")
+    assert r.returncode == 2 and "Unknown CAMERA" in r.stdout
+
+
+def test_video_run_without_tailscale_exits_10(tmp_path):
+    (tmp_path / "video.conf").write_text("PORT=5600\n")
+    fb = fake_bin(tmp_path, {"tailscale": "exit 1"})
+    r = run_script("x500-video-run", "normal", path_prefix=fb,
+                   env_extra={"X500_VIDEO_CONF": str(tmp_path / "video.conf"), "X500_VIDEO_RUN_DIR": str(tmp_path)})
+    assert r.returncode == 10 and "No Tailscale" in r.stdout

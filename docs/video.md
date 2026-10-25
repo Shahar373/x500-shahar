@@ -3,13 +3,15 @@
 ## הנתיב (ברירת מחדל)
 
 ```
-IMX219 ─► rpicam-vid --codec yuv420 ─► ffmpeg/libx264 (ultrafast, zerolatency) ─► MPEG-TS ─► SRT listener
+IMX219 ─► rpicam-vid --codec yuv420 ─┐
+                                      ├─► ffmpeg/libx264 (ultrafast, zerolatency) ─► MPEG-TS ─► SRT listener
+USB (UVC, למשל C270) ─► v4l2 MJPEG ──┘
           (x500-video@<profile>.service → /opt/x500/bin/x500-video-run, על כתובת ה-Tailscale של ה-Pi, פורט 5600)
                                                                      ▲
 מחשב Windows: FFmpeg (מתוך האפליקציה) כ-SRT caller ──────────────────┘ ─► פריימים RGB ─► מסך
 ```
 
-- **הצינור ב-Pi נשאר כמו שהוא.** האפליקציה לא מחליפה אותו ולא משנה את `x500-video-run`. היא מתחברת אליו כ-**caller**
+- **האפליקציה לא משנה את הצינור ב-Pi.** היא מתחברת אליו כ-**caller**
   עם אותן אפשרויות (‏`mode=caller&transtype=live&latency=<µs>&pkt_size=1316`).
 - **`GROUND_IP` ב-`/etc/x500/video.conf` לא בשימוש:** ה-Pi מאזין, הוא לא דוחף את הזרם לכתובת הזאת.
 - **כתובת:** כתובת ה-Tailscale ‏(IPv4) של ה-Pi, כפי שה-collector מדווח (`tailscale ip -4`). אפשר לקבוע כתובת ידנית בהגדרות.
@@ -20,6 +22,28 @@ IMX219 ─► rpicam-vid --codec yuv420 ─► ffmpeg/libx264 (ultrafast, zerola
 | high | 640×480 | 60 | 1200 kbps | 120 ms |
 | normal | 640×480 | 30 | 650 kbps | 180 ms |
 | **degraded** (ברירת מחדל) | 480×360 | 20 | 350 kbps | 300 ms |
+
+## מצלמת USB במקום מצלמת ה-Pi
+
+`x500-video-run` (מותקן עם `deploy_x500.sh`) בוחר מצלמה בכל הפעלה של השירות, לפי `CAMERA` ב-`/etc/x500/video.conf`
+(דוגמה: [`pi/x500/etc/x500/video.conf.example`](../pi/x500/etc/x500/video.conf.example)):
+
+| `CAMERA` | מה קורה |
+|---|---|
+| `auto` (ברירת מחדל, גם כשהשורה חסרה) | מצלמת USB (UVC) אם מחוברת, אחרת מצלמת ה-Pi |
+| `csi` | תמיד מצלמת ה-Pi (בדיוק הצינור הקודם) |
+| `usb` | תמיד מצלמת USB; אם אין - השירות נכשל (יציאה 11) ולא עובר בשקט למצלמת ה-Pi |
+
+- **Logitech C270** (ומרבית מצלמות הרשת): אין לה H.264, ולכן ה-Pi מפענח MJPEG ‏640×480 (‏`USB_INPUT_FORMAT`, ‏`USB_CAPTURE_SIZE`),
+  מקטין לגודל הפרופיל ומקודד ב-libx264 כמו קודם. אותם פרופילים, קצב, פורט ואפשרויות SRT, כך שבמחשב אין שום שינוי.
+- **FPS:** ה-C270 מגיעה לכל היותר ל-30 FPS. בפרופיל high (‏60) מבקשים `USB_MAX_FPS` (‏30), וה-GOP נשאר שנייה אחת.
+- **כמה מצלמות USB:** נבחרת הראשונה. לבחירה קבועה: `USB_DEVICE=/dev/v4l/by-id/usb-046d_0825_...-video-index0`.
+- **חיבור/ניתוק תוך כדי:** הבחירה נעשית בהפעלה. ניתוק מצלמת ה-USB מסיים את הזרם, systemd מפעיל מחדש ו-`auto` עובר למצלמת ה-Pi.
+  מצלמה שחוברה אחרי שהשירות עלה תשמש רק מההפעלה הבאה ("עצור וידאו" ואז "הפעל וידאו"); בדיקת המצלמה באפליקציה מציינת זאת.
+- **מה רואים באפליקציה:** הבחירה נכתבת ל-`/run/x500-video-<profile>.source`. הבדיקה "זיהוי מצלמה" עוברת עם מצלמת USB או IMX219
+  (לפי `CAMERA`), ושורת "שירות ב-Pi" בלשונית המצלמה מציינת "מצלמת USB" / "מצלמת Pi".
+- **CPU:** פענוח MJPEG מוסיף עומס על ה-Pi. מדוד כמו בסעיף "מדידה לפני העלאת עומס" למטה (התהליך שנמדד הוא `ffmpeg`).
+- **לא נבדק על חומרה:** נבדק רק מול sysfs מדומה ופקודות מדומות. ב-Pi האמיתי: `v4l2-ctl --list-devices` ו-`x500-video degraded`.
 
 ## למה לא RTSP/MediaMTX כברירת מחדל
 
